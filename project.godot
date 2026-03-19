@@ -14,7 +14,7 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 
 [application]
 
-config/name="capsule critters"
+config/name="Capsule Carnage"
 run/main_scene="res://Scenes/testworld.tscn"
 config/features=PackedStringArray("4.6", "GL Compatibility")
 config/icon="res://icon.svg"
@@ -22,6 +22,10 @@ config/icon="res://icon.svg"
 [autoload]
 
 CyclopsAutoload="*uid://4siqre3jhe80"
+
+[display]
+
+window/stretch/aspect="expand"
 
 [dotnet]
 
