@@ -45,7 +45,14 @@ io.on('connection', (socket) => {
     players[socket.id].x = data.x;
     players[socket.id].y = data.y;
     players[socket.id].z = data.z;
-    socket.broadcast.emit('playerMoved', { id: socket.id, x: data.x, y: data.y, z: data.z });
+    players[socket.id].qx = data.qx || 0;
+    players[socket.id].qy = data.qy || 0;
+    players[socket.id].qz = data.qz || 0;
+    players[socket.id].qw = data.qw || 1;
+    socket.broadcast.emit('playerMoved', {
+      id: socket.id, x: data.x, y: data.y, z: data.z,
+      qx: data.qx, qy: data.qy, qz: data.qz, qw: data.qw
+    });
   });
 
   socket.on('disconnect', () => {

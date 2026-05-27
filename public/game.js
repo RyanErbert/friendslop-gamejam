@@ -1,18 +1,14 @@
-const MAX_SPEED = 5;
-const SPRINT_SPEED = 9;
-const ACCELERATION = 12;
-const SPRINT_ACCELERATION = 20;
-const FRICTION = 8;
-const JUMP_FORCE = 8;
-const GRAVITY = -20;
-const GROUND_Y = 0.5;
-const COLLISION_RADIUS = 1.0;
-const COLLISION_PUSH = 4;
+const MOVE_FORCE = 60;
+const SPRINT_FORCE = 100;
+const MAX_SPEED = 9;
+const SPRINT_SPEED = 14;
+const JUMP_IMPULSE = 8;
 const JOYSTICK_DEADZONE = 0.15;
 
 const isMobile = /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
   || ('ontouchstart' in window);
 
+// --- Three.js scene ---
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87ceeb);
 
@@ -32,19 +28,46 @@ scene.add(new THREE.AmbientLight(0xffffff, 0.4));
 
 const groundGeo = new THREE.PlaneGeometry(50, 50);
 const groundMat = new THREE.MeshStandardMaterial({ color: 0x55aa55 });
-const ground = new THREE.Mesh(groundGeo, groundMat);
-ground.rotation.x = -Math.PI / 2;
-ground.receiveShadow = true;
-scene.add(ground);
+const groundMesh = new THREE.Mesh(groundGeo, groundMat);
+groundMesh.rotation.x = -Math.PI / 2;
+groundMesh.receiveShadow = true;
+scene.add(groundMesh);
 
+// --- Cannon.js physics world ---
+const world = new CANNON.World();
+world.gravity.set(0, -20, 0);
+world.broadphase = new CANNON.NaiveBroadphase();
+world.solver.iterations = 10;
+
+const groundMaterial = new CANNON.Material('ground');
+const playerMaterial = new CANNON.Material('player');
+
+const groundPlayerContact = new CANNON.ContactMaterial(groundMaterial, playerMaterial, {
+  friction: 0.15,
+  restitution: 0.05
+});
+const playerPlayerContact = new CANNON.ContactMaterial(playerMaterial, playerMaterial, {
+  friction: 0.3,
+  restitution: 0.2
+});
+world.addContactMaterial(groundPlayerContact);
+world.addContactMaterial(playerPlayerContact);
+
+const groundBody = new CANNON.Body({ mass: 0, material: groundMaterial });
+groundBody.addShape(new CANNON.Plane());
+groundBody.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -Math.PI / 2);
+world.addBody(groundBody);
+
+// --- State ---
 const clock = new THREE.Clock(false);
 const keys = {};
 let localPlayer = null;
+let localMesh = null;
+let localBody = null;
 let selfId = null;
-let velocityX = 0, velocityZ = 0, velocityY = 0;
-let isGrounded = true;
 const remotePlayers = new Map();
-
+const remoteMeshes = new Map();
+const remoteBodies = new Map();
 let joystickX = 0, joystickZ = 0;
 
 // --- Name entry ---
@@ -85,23 +108,16 @@ if (isMobile) {
   jumpBtn.textContent = 'JUMP';
   document.body.appendChild(jumpBtn);
 
-  jumpBtn.addEventListener('touchstart', (e) => {
-    e.preventDefault();
-    keys['Space'] = true;
-  });
-  jumpBtn.addEventListener('touchend', (e) => {
-    e.preventDefault();
-    keys['Space'] = false;
-  });
+  jumpBtn.addEventListener('touchstart', (e) => { e.preventDefault(); keys['Space'] = true; });
+  jumpBtn.addEventListener('touchend', (e) => { e.preventDefault(); keys['Space'] = false; });
 
   let joystickTouchId = null;
   const JOYSTICK_RADIUS = 50;
 
   joystickBase.addEventListener('touchstart', (e) => {
     e.preventDefault();
-    const touch = e.changedTouches[0];
-    joystickTouchId = touch.identifier;
-    updateJoystick(touch);
+    joystickTouchId = e.changedTouches[0].identifier;
+    updateJoystick(e.changedTouches[0]);
   });
   window.addEventListener('touchmove', (e) => {
     if (joystickTouchId === null) return;
@@ -111,8 +127,7 @@ if (isMobile) {
     updateJoystick(touch);
   }, { passive: false });
   window.addEventListener('touchend', (e) => {
-    const touch = findTouch(e.changedTouches, joystickTouchId);
-    if (!touch) return;
+    if (!findTouch(e.changedTouches, joystickTouchId)) return;
     joystickTouchId = null;
     joystickKnob.style.transform = 'translate(-50%, -50%)';
     joystickX = 0;
@@ -141,13 +156,8 @@ if (isMobile) {
     const rawX = dx / JOYSTICK_RADIUS;
     const rawZ = dy / JOYSTICK_RADIUS;
     const mag = Math.sqrt(rawX * rawX + rawZ * rawZ);
-    if (mag < JOYSTICK_DEADZONE) {
-      joystickX = 0;
-      joystickZ = 0;
-    } else {
-      joystickX = rawX;
-      joystickZ = rawZ;
-    }
+    joystickX = mag < JOYSTICK_DEADZONE ? 0 : rawX;
+    joystickZ = mag < JOYSTICK_DEADZONE ? 0 : rawZ;
   }
 } else {
   window.addEventListener('keydown', (e) => {
@@ -176,7 +186,6 @@ function createNameSprite(name) {
   ctx.fill();
   ctx.fillStyle = '#ffffff';
   ctx.fillText(name, 128, 38);
-
   const texture = new THREE.CanvasTexture(canvas);
   const mat = new THREE.SpriteMaterial({ map: texture, depthTest: false });
   const sprite = new THREE.Sprite(mat);
@@ -184,9 +193,9 @@ function createNameSprite(name) {
   return sprite;
 }
 
-function createPlayerMesh(color, type, name) {
+// --- Player creation ---
+function createPlayerVisual(color, type, name) {
   const group = new THREE.Group();
-
   const geo = type === 'ball'
     ? new THREE.SphereGeometry(0.5, 24, 24)
     : new THREE.BoxGeometry(1, 1, 1);
@@ -194,21 +203,49 @@ function createPlayerMesh(color, type, name) {
   const mesh = new THREE.Mesh(geo, mat);
   mesh.castShadow = true;
   group.add(mesh);
-
   const label = createNameSprite(name);
   label.position.y = 1.2;
   group.add(label);
-
   scene.add(group);
-  return group;
+  return { group, mesh };
 }
 
-// --- Movement with acceleration ---
+function createPlayerBody(type, isLocal) {
+  const shape = type === 'ball'
+    ? new CANNON.Sphere(0.5)
+    : new CANNON.Box(new CANNON.Vec3(0.5, 0.5, 0.5));
+
+  const body = new CANNON.Body({
+    mass: isLocal ? 1 : 0,
+    material: playerMaterial,
+    shape: shape,
+    linearDamping: 0.1,
+    angularDamping: 0.05
+  });
+  body.position.set(0, 1, 0);
+  world.addBody(body);
+  return body;
+}
+
+// --- Check if player is on the ground ---
+function isGrounded() {
+  if (!localBody) return false;
+  // Cast downward from body center
+  const from = localBody.position;
+  const to = new CANNON.Vec3(from.x, from.y - 0.7, from.z);
+  const ray = new CANNON.Ray(from, to);
+  ray.mode = CANNON.Ray.CLOSEST;
+  ray.skipBackfaces = true;
+  const result = new CANNON.RaycastResult();
+  ray.intersectBodies(world.bodies.filter(b => b !== localBody), result);
+  return result.hasHit;
+}
+
+// --- Movement ---
 function handleMovement(delta) {
-  if (!localPlayer) return;
+  if (!localBody) return;
 
   let inputX = 0, inputZ = 0;
-
   if (isMobile) {
     inputX = joystickX;
     inputZ = joystickZ;
@@ -220,12 +257,14 @@ function handleMovement(delta) {
   }
 
   const inputLen = Math.sqrt(inputX * inputX + inputZ * inputZ);
+  const grounded = isGrounded();
+
   if (inputLen > 0) {
     const inputMag = Math.min(inputLen, 1);
     const nx = inputX / inputLen;
     const nz = inputZ / inputLen;
 
-    // Transform input relative to camera direction
+    // Camera-relative direction
     const forward = new THREE.Vector3();
     camera.getWorldDirection(forward);
     forward.y = 0;
@@ -236,98 +275,53 @@ function handleMovement(delta) {
     const worldZ = right.z * nx + forward.z * (-nz);
 
     const sprinting = keys['ShiftLeft'] || keys['ShiftRight'];
-    const accel = sprinting ? SPRINT_ACCELERATION : ACCELERATION;
-    velocityX += worldX * inputMag * accel * delta;
-    velocityZ += worldZ * inputMag * accel * delta;
-  }
+    const force = sprinting ? SPRINT_FORCE : MOVE_FORCE;
 
-  // Friction
-  const speed = Math.sqrt(velocityX * velocityX + velocityZ * velocityZ);
-  if (speed > 0) {
-    const friction = FRICTION * delta;
-    const newSpeed = Math.max(0, speed - friction);
-    velocityX = (velocityX / speed) * newSpeed;
-    velocityZ = (velocityZ / speed) * newSpeed;
-  }
+    // Apply force at body center
+    localBody.applyForce(
+      new CANNON.Vec3(worldX * force * inputMag, 0, worldZ * force * inputMag),
+      localBody.position
+    );
 
-  // Clamp to max speed
-  const sprinting = keys['ShiftLeft'] || keys['ShiftRight'];
-  const cap = sprinting ? SPRINT_SPEED : MAX_SPEED;
-  const currentSpeed = Math.sqrt(velocityX * velocityX + velocityZ * velocityZ);
-  if (currentSpeed > cap) {
-    velocityX = (velocityX / currentSpeed) * cap;
-    velocityZ = (velocityZ / currentSpeed) * cap;
+    // Speed cap via velocity clamping
+    const cap = sprinting ? SPRINT_SPEED : MAX_SPEED;
+    const vx = localBody.velocity.x;
+    const vz = localBody.velocity.z;
+    const hSpeed = Math.sqrt(vx * vx + vz * vz);
+    if (hSpeed > cap) {
+      localBody.velocity.x = (vx / hSpeed) * cap;
+      localBody.velocity.z = (vz / hSpeed) * cap;
+    }
   }
-
-  localPlayer.position.x += velocityX * delta;
-  localPlayer.position.z += velocityZ * delta;
 
   // Jump
-  if (keys['Space'] && isGrounded) {
-    velocityY = JUMP_FORCE;
-    isGrounded = false;
-  }
-
-  velocityY += GRAVITY * delta;
-  localPlayer.position.y += velocityY * delta;
-
-  if (localPlayer.position.y <= GROUND_Y) {
-    localPlayer.position.y = GROUND_Y;
-    velocityY = 0;
-    isGrounded = true;
-  }
-
-  // AABB collisions with remote players
-  const HALF = 0.5;
-  for (const [id, remote] of remotePlayers) {
-    const dx = localPlayer.position.x - remote.position.x;
-    const dy = localPlayer.position.y - remote.position.y;
-    const dz = localPlayer.position.z - remote.position.z;
-
-    const overlapX = HALF + HALF - Math.abs(dx);
-    const overlapY = HALF + HALF - Math.abs(dy);
-    const overlapZ = HALF + HALF - Math.abs(dz);
-
-    if (overlapX <= 0 || overlapY <= 0 || overlapZ <= 0) continue;
-
-    // Resolve on the axis with smallest overlap
-    if (overlapY < overlapX && overlapY < overlapZ) {
-      if (dy > 0) {
-        // Local is above — land on top
-        localPlayer.position.y = remote.position.y + 1.0;
-        if (velocityY < 0) { velocityY = 0; isGrounded = true; }
-      } else {
-        // Local is below — bonk head
-        localPlayer.position.y = remote.position.y - 1.0;
-        if (velocityY > 0) velocityY = 0;
-      }
-    } else if (overlapX < overlapZ) {
-      localPlayer.position.x += (dx > 0 ? overlapX : -overlapX);
-      velocityX *= 0.5;
-    } else {
-      localPlayer.position.z += (dz > 0 ? overlapZ : -overlapZ);
-      velocityZ *= 0.5;
-    }
+  if (keys['Space'] && grounded) {
+    localBody.velocity.y = JUMP_IMPULSE;
+    keys['Space'] = false;
   }
 }
 
-// --- Camera trailing behind movement direction ---
+// --- Sync Three.js from physics ---
+function syncMeshToBody(group, mesh, body) {
+  group.position.copy(body.position);
+  mesh.quaternion.copy(body.quaternion);
+}
+
+// --- Camera: fixed radius, dragged anchor ---
 let chainLength = 6;
 let camHeight = 3.5;
 
 function updateCamera(delta) {
   if (!localPlayer) return;
 
-  // Height follows smoothly
   const targetY = localPlayer.position.y + camHeight;
   camera.position.y += (targetY - camera.position.y) * 0.1;
 
-  // XZ: camera gets dragged when chain goes taut
   const dx = camera.position.x - localPlayer.position.x;
   const dz = camera.position.z - localPlayer.position.z;
   const dist = Math.sqrt(dx * dx + dz * dz);
 
-  if (dist > chainLength) {
+  if (dist > 0.001) {
     camera.position.x = localPlayer.position.x + (dx / dist) * chainLength;
     camera.position.z = localPlayer.position.z + (dz / dist) * chainLength;
   }
@@ -349,28 +343,38 @@ function startGame() {
 socket.on('currentPlayers', (data) => {
   selfId = data.selfId;
   for (const [id, info] of Object.entries(data.players)) {
-    const group = createPlayerMesh(info.color, info.type, info.name);
+    const { group, mesh } = createPlayerVisual(info.color, info.type, info.name);
     group.position.set(info.x, info.y, info.z);
     if (id === selfId) {
       localPlayer = group;
+      localMesh = mesh;
+      localBody = createPlayerBody(info.type, true);
+      localBody.position.set(info.x, info.y || 1, info.z);
     } else {
       remotePlayers.set(id, group);
+      remoteMeshes.set(id, mesh);
+      const body = createPlayerBody(info.type, false);
+      body.position.set(info.x, info.y, info.z);
+      remoteBodies.set(id, body);
     }
   }
 });
 
 socket.on('newPlayer', (data) => {
-  const group = createPlayerMesh(data.color, data.type, data.name);
+  const { group, mesh } = createPlayerVisual(data.color, data.type, data.name);
   group.position.set(data.x, data.y, data.z);
   remotePlayers.set(data.id, group);
+  remoteMeshes.set(data.id, mesh);
+  const body = createPlayerBody(data.type, false);
+  body.position.set(data.x, data.y, data.z);
+  remoteBodies.set(data.id, body);
 });
 
 const remoteTargets = new Map();
 
 socket.on('playerMoved', (data) => {
-  const group = remotePlayers.get(data.id);
-  if (group) {
-    remoteTargets.set(data.id, { x: data.x, y: data.y, z: data.z });
+  if (remotePlayers.has(data.id)) {
+    remoteTargets.set(data.id, data);
   }
 });
 
@@ -379,20 +383,24 @@ socket.on('playerDisconnected', (id) => {
   if (group) {
     scene.remove(group);
     remotePlayers.delete(id);
+    remoteMeshes.delete(id);
     remoteTargets.delete(id);
+    const body = remoteBodies.get(id);
+    if (body) { world.remove(body); remoteBodies.delete(id); }
   }
 });
 
 function sendPosition() {
-  if (!localPlayer) return;
-  const p = localPlayer.position;
-  if (p.x !== lastSentPos.x || p.y !== lastSentPos.y || p.z !== lastSentPos.z) {
-    lastSentPos = { x: p.x, y: p.y, z: p.z };
-    socket.emit('playerMoved', lastSentPos);
-  }
+  if (!localBody) return;
+  const p = localBody.position;
+  const q = localBody.quaternion;
+  socket.emit('playerMoved', {
+    x: p.x, y: p.y, z: p.z,
+    qx: q.x, qy: q.y, qz: q.z, qw: q.w
+  });
 }
 
-// --- Debug HUD (toggle with F3) ---
+// --- Debug HUD ---
 let debugVisible = false;
 const debugEl = document.createElement('div');
 debugEl.id = 'debug-hud';
@@ -412,7 +420,7 @@ window.addEventListener('keydown', (e) => {
 let fpsFrames = 0, fpsTime = 0, fpsDisplay = 0;
 
 function updateDebug(delta) {
-  if (!debugVisible || !localPlayer) return;
+  if (!debugVisible || !localBody) return;
   fpsFrames++;
   fpsTime += delta;
   if (fpsTime >= 0.5) {
@@ -420,38 +428,68 @@ function updateDebug(delta) {
     fpsFrames = 0;
     fpsTime = 0;
   }
-  const speed = Math.sqrt(velocityX * velocityX + velocityZ * velocityZ);
+  const v = localBody.velocity;
+  const hSpeed = Math.sqrt(v.x * v.x + v.z * v.z);
   const sprinting = keys['ShiftLeft'] || keys['ShiftRight'];
-  const p = localPlayer.position;
+  const p = localBody.position;
+  const av = localBody.angularVelocity;
+  const angSpeed = Math.sqrt(av.x * av.x + av.y * av.y + av.z * av.z);
   debugEl.textContent =
     `FPS:   ${fpsDisplay}\n` +
-    `Speed: ${speed.toFixed(2)} / ${sprinting ? SPRINT_SPEED : MAX_SPEED}\n` +
-    `Vel:   (${velocityX.toFixed(2)}, ${velocityZ.toFixed(2)})\n` +
+    `Speed: ${hSpeed.toFixed(2)} / ${sprinting ? SPRINT_SPEED : MAX_SPEED}\n` +
+    `Vel:   (${v.x.toFixed(2)}, ${v.y.toFixed(2)}, ${v.z.toFixed(2)})\n` +
     `Pos:   (${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)})\n` +
-    `State: ${sprinting ? 'SPRINT' : 'walk'}${isGrounded ? '' : ' (air)'}\n` +
+    `Spin:  ${angSpeed.toFixed(2)} rad/s\n` +
+    `State: ${sprinting ? 'SPRINT' : 'walk'}${isGrounded() ? '' : ' (air)'}\n` +
     `Delta: ${(delta * 1000).toFixed(1)}ms\n` +
     `Chain: ${chainLength.toFixed(1)} [ / ] to adjust`;
 }
+
+// --- Main loop ---
+const PHYSICS_STEP = 1 / 60;
 
 function animate() {
   requestAnimationFrame(animate);
   const rawDelta = clock.getDelta();
   const delta = Math.min(rawDelta, 0.05);
-  if (gameStarted && localPlayer) {
-    // Interpolate remote players toward their targets
+
+  if (gameStarted && localBody) {
+    // Update remote body positions (kinematic)
+    for (const [id, target] of remoteTargets) {
+      const body = remoteBodies.get(id);
+      if (body) {
+        body.position.set(target.x, target.y, target.z);
+        if (target.qx !== undefined) {
+          body.quaternion.set(target.qx, target.qy, target.qz, target.qw);
+        }
+      }
+    }
+
+    handleMovement(delta);
+    world.step(PHYSICS_STEP, delta, 3);
+
+    // Sync local player
+    syncMeshToBody(localPlayer, localMesh, localBody);
+
+    // Sync remote players (interpolate visuals)
     for (const [id, target] of remoteTargets) {
       const group = remotePlayers.get(id);
-      if (group) {
+      const mesh = remoteMeshes.get(id);
+      if (group && mesh) {
         group.position.x += (target.x - group.position.x) * 0.3;
         group.position.y += (target.y - group.position.y) * 0.3;
         group.position.z += (target.z - group.position.z) * 0.3;
+        if (target.qx !== undefined) {
+          mesh.quaternion.slerp(new THREE.Quaternion(target.qx, target.qy, target.qz, target.qw), 0.3);
+        }
       }
     }
-    handleMovement(delta);
+
     updateCamera(delta);
     sendPosition();
     updateDebug(delta);
   }
+
   renderer.render(scene, camera);
 }
 animate();
