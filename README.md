@@ -34,6 +34,6 @@ Open `http://localhost:3001` in two browser tabs. Other devices on your network 
 Ready for Render, Railway, or any Node.js host. The server reads `process.env.PORT` automatically.
 
 
-PLay it here!
+Play it here!
 
 https://friendslop-gamejam.onrender.com/

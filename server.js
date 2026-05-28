@@ -10,6 +10,8 @@ const io = new Server(server);
 
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/levels', express.static(path.join(__dirname, 'levels')));
+app.use('/music', express.static(path.join(__dirname, 'music')));
+app.use('/sound', express.static(path.join(__dirname, 'sound')));
 
 let activeLevel = 'level_1.glb';
 
@@ -125,9 +127,10 @@ io.on('connection', (socket) => {
     players[socket.id].qy = data.qy || 0;
     players[socket.id].qz = data.qz || 0;
     players[socket.id].qw = data.qw || 1;
+    players[socket.id].smoothing = data.smoothing;
     socket.broadcast.emit('playerMoved', {
       id: socket.id, x: data.x, y: data.y, z: data.z,
-      qx: data.qx, qy: data.qy, qz: data.qz, qw: data.qw
+      qx: data.qx, qy: data.qy, qz: data.qz, qw: data.qw, smoothing: data.smoothing
     });
   });
 
@@ -140,6 +143,14 @@ io.on('connection', (socket) => {
     tagCooldownUntil = now + TAG_COOLDOWN_MS;
     io.emit('holderChanged', holderID);
     io.emit('tagCooldown', TAG_COOLDOWN_MS);
+  });
+
+  socket.on('jump', () => {
+    socket.broadcast.emit('playerJumped', socket.id);
+  });
+
+  socket.on('sprintStart', () => {
+    socket.broadcast.emit('playerSprintStart', socket.id);
   });
 
   socket.on('disconnect', () => {

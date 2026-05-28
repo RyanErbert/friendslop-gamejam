@@ -43,10 +43,32 @@ const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerH
 camera.position.set(0, 5, 10);
 scene.add(camera);
 
-const gimbal = new THREE.AxesHelper(0.5);
-gimbal.position.set(0.8, -0.6, -2);
+const gimbal = new THREE.AxesHelper(0.2);
+gimbal.position.set(-1.2, 0.7, -2.5);
 gimbal.visible = false;
 camera.add(gimbal);
+
+// Helper to create axis labels for the gimbal
+function createAxisLabel(text, color, position) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64; canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  ctx.font = 'bold 48px monospace';
+  ctx.fillStyle = color;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 32, 36);
+  const texture = new THREE.CanvasTexture(canvas);
+  const mat = new THREE.SpriteMaterial({ map: texture, depthTest: false, depthWrite: false });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(0.2, 0.2, 1);
+  sprite.position.copy(position);
+  sprite.renderOrder = 1000;
+  return sprite;
+}
+gimbal.add(createAxisLabel('X', '#ff4444', new THREE.Vector3(0.25, 0, 0)));
+gimbal.add(createAxisLabel('Y', '#44ff44', new THREE.Vector3(0, 0.25, 0)));
+gimbal.add(createAxisLabel('Z', '#4444ff', new THREE.Vector3(0, 0, 0.25)));
 
 // --- Sky gradient ---
 const skyCanvas = document.createElement('canvas');
@@ -216,6 +238,8 @@ const remoteMeshes = new Map();
 const remoteBodies = new Map();
 const outlineMeshes = new Map();
 let joystickX = 0, joystickZ = 0;
+let mobileSprinting = false;
+let lastJoystickTap = 0;
 let airTime = 0;
 let lastGroundedTime = 0;
 const COYOTE_TIME = 0.025;
@@ -227,10 +251,12 @@ let jumpCharge = 0;
 let isChargingJump = false;
 let jumpCooldownTimer = 0;
 let jumpCooldownMax = 0;
+let jumpCooldownStartPct = 0;
 
 // --- Sprint stamina state ---
 let sprintStamina = SPRINT_DURATION;
 let sprintExhausted = false;
+let wasSprinting = false;
 
 // --- Tag cooldown state ---
 let tagCooldownTimer = 0;
@@ -245,6 +271,46 @@ let speedCapCurrent = MAX_SPEED;
 let holderID = null;
 let allScores = {};
 let leaderID = null;
+
+// --- Audio state ---
+const music = new Audio('/music/background.mp3');
+music.loop = true;
+let musicVolume = 0;
+music.volume = musicVolume;
+let musicPlaying = false;
+
+const boostSound = new Audio('/sound/boost.wav');
+boostSound.volume = 0.4;
+
+const jumpSounds = [
+  new Audio('/sound/jump_1.wav'),
+  new Audio('/sound/jump_2.wav'),
+  new Audio('/sound/jump_3.wav'),
+  new Audio('/sound/jump_4.wav'),
+];
+const JUMP_SOUND_BASE_VOLUME = 0.5;
+
+const MAX_SOUND_DIST = 50;
+
+function playWorldSound(sound, position, baseVolume = 1.0) {
+  if (!position) return;
+  const dist = camera.position.distanceTo(position);
+
+  if (dist > MAX_SOUND_DIST) return;
+
+  const volume = baseVolume * Math.max(0, 1 - (dist / MAX_SOUND_DIST));
+  sound.volume = volume;
+
+  if (sound.volume > 0.01) {
+    sound.currentTime = 0;
+    sound.play().catch(e => { /* ignore play error */ });
+  }
+}
+
+function playRandomJumpSound(position) {
+  const sound = jumpSounds[Math.floor(Math.random() * jumpSounds.length)];
+  playWorldSound(sound, position, JUMP_SOUND_BASE_VOLUME);
+}
 
 // --- Spawn editor state ---
 const spawnMarkers = [];
@@ -271,6 +337,14 @@ function joinGame() {
   nameScreen.style.display = 'none';
   hud.style.display = '';
   leaderDisplay.style.display = '';
+
+  // Start music on first join
+  if (!musicPlaying) {
+    // play() must be called in a user interaction event (like this click)
+    const playPromise = music.play();
+    if (playPromise) playPromise.catch(e => console.warn("Music autoplay was blocked by the browser."));
+    musicPlaying = true;
+  }
 
   // Load the selected or active level
   const levelToLoad = selectedLevel || serverActiveLevel || 'level_1.glb';
@@ -334,8 +408,8 @@ function createMeter(id, label) {
   return { wrap, fill };
 }
 
-const sprintMeter = createMeter('sprint-meter', '\u{1F3C3} SPRINT');
-const jumpMeter = createMeter('jump-meter', '\u{1F998} JUMP');
+const sprintMeter = createMeter('sprint-meter', '>> SPRINT');
+const jumpMeter = createMeter('jump-meter', '^ JUMP');
 
 function updateMeters() {
   // Sprint meter
@@ -347,8 +421,8 @@ function updateMeters() {
   // Jump meter
   jumpMeter.wrap.style.display = gameStarted ? '' : 'none';
   if (jumpCooldownTimer > 0) {
-    const cdPct = jumpCooldownTimer / jumpCooldownMax;
-    jumpMeter.fill.style.width = (cdPct * 100) + '%';
+    const cdProgress = (jumpCooldownMax > 0) ? (jumpCooldownTimer / jumpCooldownMax) : 0; // 1 -> 0
+    jumpMeter.fill.style.width = (jumpCooldownStartPct * cdProgress * 100) + '%';
     jumpMeter.fill.style.backgroundColor = '#cc2222';
   } else if (isChargingJump) {
     const chargePct = (jumpCharge - 1) / (MAX_CHARGE_MULT - 1);
@@ -549,6 +623,11 @@ if (isMobile) {
     e.preventDefault();
     joystickTouchId = e.changedTouches[0].identifier;
     updateJoystick(e.changedTouches[0]);
+    const now = performance.now();
+    if (now - lastJoystickTap < 300) {
+      mobileSprinting = true;
+    }
+    lastJoystickTap = now;
   });
   window.addEventListener('touchmove', (e) => {
     if (joystickTouchId === null) return;
@@ -562,6 +641,7 @@ if (isMobile) {
     joystickTouchId = null;
     joystickKnob.style.transform = 'translate(-50%, -50%)';
     joystickX = 0; joystickZ = 0;
+    mobileSprinting = false;
   });
 
   function findTouch(touches, id) {
@@ -684,14 +764,14 @@ function createPhysicsShape(shape) {
 }
 
 let roundcubeSmoothing = 0.25;
-function smoothRoundcube(geo) {
+function smoothRoundcube(geo, smoothingVal = roundcubeSmoothing) {
   const pos = geo.attributes.position;
   const box = new THREE.Vector3();
   const sphere = new THREE.Vector3();
   for (let i = 0; i < pos.count; i++) {
     box.fromBufferAttribute(pos, i);
     sphere.copy(box).normalize().multiplyScalar(0.5);
-    box.lerp(sphere, roundcubeSmoothing);
+    box.lerp(sphere, smoothingVal);
     pos.setXYZ(i, box.x, box.y, box.z);
   }
   geo.computeVertexNormals();
@@ -713,6 +793,7 @@ function createPlayerVisual(color, shape, name, skinImage) {
   }
 
   const mesh = new THREE.Mesh(geo, mat);
+  if (shape === 'roundcube') mesh.userData.smoothing = 0.25;
   mesh.castShadow = true;
   group.add(mesh);
 
@@ -821,8 +902,14 @@ function handleMovement(delta) {
   const grounded = checkGrounded();
 
   // Sprint stamina
-  const wantsSprint = keys['ShiftLeft'] || keys['ShiftRight'];
+  const wantsSprint = keys['ShiftLeft'] || keys['ShiftRight'] || mobileSprinting;
   const sprinting = wantsSprint && !sprintExhausted && inputLen > 0;
+
+  if (sprinting && !wasSprinting) {
+    playWorldSound(boostSound, localBody.position, 0.4);
+    socket.emit('sprintStart');
+  }
+  wasSprinting = sprinting;
 
   if (sprinting) {
     sprintStamina -= delta;
@@ -892,8 +979,8 @@ function handleMovement(delta) {
   const timeSinceGrounded = now - lastGroundedTime;
   const canJump = timeSinceGrounded < COYOTE_TIME;
 
-  // Charge while grounded (or within coyote window) and space held
-  if (keys['Space'] && canJump && jumpCooldownTimer <= 0) {
+  // Charge whenever space is held and jump is not on cooldown
+  if (keys['Space'] && jumpCooldownTimer <= 0) {
     if (!isChargingJump) {
       isChargingJump = true;
       jumpCharge = 1;
@@ -901,14 +988,20 @@ function handleMovement(delta) {
     jumpCharge = Math.min(jumpCharge + CHARGE_RATE * delta, MAX_CHARGE_MULT);
   }
 
-  // Jump fires ONLY on space release
+  // Jump fires ONLY on space release, and resets charge
   if (!keys['Space'] && isChargingJump) {
+    // Only jump if we are on the ground or within coyote time window
     if (canJump) {
       localBody.velocity.y = JUMP_IMPULSE * jumpCharge;
-      const chargeNorm = (jumpCharge - 1) / (MAX_CHARGE_MULT - 1);
-      jumpCooldownMax = chargeNorm * JUMP_CD_AT_FULL;
-      jumpCooldownTimer = jumpCooldownMax;
+      // Cooldown duration is proportional to jump charge (1s per 1x).
+      // The bar starts at a width proportional to charge and shrinks at a constant rate.
+      jumpCooldownMax = jumpCharge;
+      jumpCooldownTimer = jumpCharge;
+      jumpCooldownStartPct = jumpCharge / MAX_CHARGE_MULT;
+      playRandomJumpSound(localBody.position);
+      socket.emit('jump');
     }
+    // Reset charge regardless of success (i.e. if you release in mid-air)
     isChargingJump = false;
     jumpCharge = 0;
   }
@@ -948,6 +1041,7 @@ const MOUSE_SENSITIVITY = 0.003;
 const CAM_DRAG_SPEED = 1.8;
 let lastMouseMoveTime = 0;
 const MOUSE_IDLE_DELAY = 0.6;
+let cameraLookAtTarget = new THREE.Vector3();
 
 let mouseDragging = false;
 let pointerLockSupported = false;
@@ -1096,21 +1190,25 @@ function updateCamera(delta) {
   const offsetZ = Math.cos(camYaw) * Math.cos(camPitch) * chainLength;
   const offsetY = Math.sin(camPitch) * chainLength;
 
-  const targetX = localPlayer.position.x + offsetX;
-  const targetY = localPlayer.position.y + offsetY + 1.5;
-  const targetZ = localPlayer.position.z + offsetZ;
-
   // Frame-rate independent exponential smoothing
   // Slower follow when sprinting = camera lags behind, feels like it's catching up
   const speedFactor = Math.min(1, playerSpeed / SPRINT_SPEED);
   const baseLerp = 1 - Math.exp(-6 * delta);
   const camLerp = baseLerp * (1 - speedFactor * 0.4);
 
-  camera.position.x += (targetX - camera.position.x) * camLerp;
-  camera.position.y += (targetY - camera.position.y) * camLerp;
-  camera.position.z += (targetZ - camera.position.z) * camLerp;
+  // Smoothly move the look-at target towards the player's head
+  const lookAtTargetPos = new THREE.Vector3().copy(localPlayer.position).add(new THREE.Vector3(0, 1.0, 0));
+  const lookAtLerp = 1 - Math.exp(-15 * delta); // A fairly snappy but smooth lerp
+  cameraLookAtTarget.lerp(lookAtTargetPos, lookAtLerp);
 
-  camera.lookAt(localPlayer.position.x, localPlayer.position.y + 1.0, localPlayer.position.z);
+  // Base the camera's target position on the smoothed look-at point, not the raw player position.
+  // This prevents camera bobbing from physics ground jitter.
+  const targetX = localPlayer.position.x + offsetX;
+  const targetY = cameraLookAtTarget.y + 0.5 + offsetY;
+  const targetZ = localPlayer.position.z + offsetZ;
+
+  camera.position.lerp(new THREE.Vector3(targetX, targetY, targetZ), camLerp);
+  camera.lookAt(cameraLookAtTarget);
 }
 
 // --- Oddball visuals ---
@@ -1254,9 +1352,9 @@ socket.on('currentPlayers', (data) => {
       localCrown = crown;
       localScoreSprite = scoreSprite;
       localBody = createPlayerBody(shape, true);
-      const sp = randomSpawn();
-      localBody.position.set(sp.x, sp.y, sp.z);
-      camera.position.set(sp.x, sp.y + camHeight, sp.z + chainLength);
+      localBody.position.set(info.x, info.y, info.z);
+      camera.position.set(group.position.x, group.position.y + camHeight, group.position.z + chainLength);
+      cameraLookAtTarget.copy(localBody.position);
     } else {
       remotePlayers.set(id, group);
       remoteMeshes.set(id, mesh);
@@ -1282,6 +1380,20 @@ socket.on('newPlayer', (data) => {
 });
 
 const remoteTargets = new Map();
+
+socket.on('playerJumped', (id) => {
+  const playerGroup = remotePlayers.get(id);
+  if (playerGroup) {
+    playRandomJumpSound(playerGroup.position);
+  }
+});
+
+socket.on('playerSprintStart', (id) => {
+  const playerGroup = remotePlayers.get(id);
+  if (playerGroup) {
+    playWorldSound(boostSound, playerGroup.position, 0.4);
+  }
+});
 
 socket.on('playerMoved', (data) => {
   if (remotePlayers.has(data.id)) remoteTargets.set(data.id, data);
@@ -1325,7 +1437,7 @@ function sendPosition() {
   if (!localBody) return;
   const p = localBody.position;
   const q = localBody.quaternion;
-  socket.emit('playerMoved', { x: p.x, y: p.y, z: p.z, qx: q.x, qy: q.y, qz: q.z, qw: q.w });
+  socket.emit('playerMoved', { x: p.x, y: p.y, z: p.z, qx: q.x, qy: q.y, qz: q.z, qw: q.w, smoothing: roundcubeSmoothing });
 }
 
 // --- Godmode / Noclip ---
@@ -1423,6 +1535,15 @@ window.addEventListener('keydown', (e) => {
     originalSmoothing = roundcubeSmoothing;
     rebuildLocalRoundcube();
   }
+  if (debugVisible) {
+    if (e.code === 'PageUp') {
+      musicVolume = Math.min(1, musicVolume + 0.1);
+      music.volume = musicVolume;
+    } else if (e.code === 'PageDown') {
+      musicVolume = Math.max(0, musicVolume - 0.1);
+      music.volume = musicVolume;
+    }
+  }
 });
 
 function rebuildLocalRoundcube() {
@@ -1503,7 +1624,8 @@ function updateDebug(delta) {
     `Tag CD:${tagCooldownTimer > 0 ? tagCooldownTimer.toFixed(1) + 's' : 'none'}\n` +
     `Score: ${myScore}  ${holderID === selfId ? '[IT]' : ''}\n` +
     `Chain: ${chainLength.toFixed(1)} [ / ] to adjust\n` +
-    (playerShape === 'roundcube' ? `Round: ${roundcubeSmoothing.toFixed(2)} < / > to adjust\n` : '') +
+    (playerShape === 'roundcube' ? `Round: ${roundcubeSmoothing.toFixed(2)} (<, >)\n` : '') +
+    `Music: ${Math.round(musicVolume * 100)}% (PgUp/PgDn)\n` +
     `F4: godmode`;
 }
 
@@ -1528,6 +1650,7 @@ function animate() {
       if (levelLoaded) world.step(PHYSICS_STEP, delta, 3);
       resolveWallCollisions(localBody);
       syncMeshToBody(localPlayer, localMesh, localBody);
+
       if (checkGrounded()) {
         airTime = 0;
       } else {
@@ -1551,6 +1674,20 @@ function animate() {
         group.position.z += (target.z - group.position.z) * 0.3;
         if (target.qx !== undefined) {
           mesh.quaternion.slerp(new THREE.Quaternion(target.qx, target.qy, target.qz, target.qw), 0.3);
+        }
+        if (target.smoothing !== undefined && mesh.userData.smoothing !== undefined && mesh.userData.smoothing !== target.smoothing) {
+          mesh.userData.smoothing = target.smoothing;
+          const oldGeo = mesh.geometry;
+          let geo = new THREE.BoxGeometry(1, 1, 1, 8, 8, 8);
+          geo = smoothRoundcube(geo, target.smoothing);
+          mesh.geometry = geo;
+          oldGeo.dispose();
+          const outline = mesh.children.find(c => c.isMesh);
+          if (outline) {
+            const oldOutGeo = outline.geometry;
+            outline.geometry = geo.clone();
+            oldOutGeo.dispose();
+          }
         }
       }
     }
