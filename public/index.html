@@ -11,7 +11,7 @@
     #name-screen {
       position: absolute;
       inset: 0;
-      background: rgba(0,0,0,0.7);
+      background: rgba(0,0,0,0.85);
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -19,11 +19,13 @@
       z-index: 10;
       font-family: monospace;
       color: white;
+      gap: 12px;
     }
-    #name-screen h1 { font-size: 28px; margin-bottom: 20px; }
-    #name-input {
-      font-size: 20px;
-      padding: 8px 16px;
+    #name-screen h1 { font-size: 28px; margin-bottom: 8px; }
+    #name-screen label { font-size: 13px; color: #aaa; }
+    #name-input, #skin-image-input {
+      font-size: 18px;
+      padding: 6px 14px;
       font-family: monospace;
       text-align: center;
       border: 2px solid #fff;
@@ -32,10 +34,39 @@
       border-radius: 6px;
       outline: none;
       max-width: 200px;
+      width: 200px;
     }
-    #name-input::placeholder { color: rgba(255,255,255,0.4); }
+    #skin-image-input { font-size: 12px; }
+    #name-input::placeholder, #skin-image-input::placeholder { color: rgba(255,255,255,0.4); }
+    .option-row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: center;
+    }
+    .shape-btn {
+      width: 50px; height: 50px;
+      border: 2px solid #555;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.08);
+      color: white;
+      font-family: monospace;
+      font-size: 10px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: border-color 0.15s;
+    }
+    .shape-btn.selected { border-color: #4488ff; background: rgba(68,136,255,0.2); }
+    .shape-btn:hover { border-color: #88aaff; }
+    #color-picker {
+      width: 50px; height: 40px;
+      border: none; border-radius: 6px;
+      cursor: pointer; background: none;
+    }
     #join-btn {
-      margin-top: 16px;
+      margin-top: 8px;
       padding: 10px 32px;
       font-size: 18px;
       font-family: monospace;
@@ -56,23 +87,33 @@
       font-size: 14px;
       text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
     }
+    #leader-display {
+      position: absolute;
+      top: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: white;
+      font-family: monospace;
+      font-size: 18px;
+      font-weight: bold;
+      text-shadow: 1px 1px 3px rgba(0,0,0,0.9);
+      text-align: center;
+      display: none;
+      pointer-events: none;
+    }
+    #leader-display .crown { font-size: 22px; }
     #joystick-base {
       position: absolute;
-      bottom: 30px;
-      left: 30px;
-      width: 120px;
-      height: 120px;
+      bottom: 30px; left: 30px;
+      width: 120px; height: 120px;
       border-radius: 50%;
       background: rgba(255,255,255,0.15);
       border: 3px solid rgba(255,255,255,0.4);
       touch-action: none;
     }
     #joystick-knob {
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      width: 50px;
-      height: 50px;
+      position: absolute; top: 50%; left: 50%;
+      width: 50px; height: 50px;
       border-radius: 50%;
       background: rgba(255,255,255,0.5);
       transform: translate(-50%, -50%);
@@ -80,39 +121,46 @@
     }
     #jump-btn {
       position: absolute;
-      bottom: 40px;
-      right: 40px;
-      width: 80px;
-      height: 80px;
+      bottom: 40px; right: 40px;
+      width: 80px; height: 80px;
       border-radius: 50%;
       background: rgba(255,255,255,0.3);
       border: 3px solid rgba(255,255,255,0.6);
       color: white;
       font-family: monospace;
-      font-size: 16px;
-      font-weight: bold;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      user-select: none;
-      -webkit-user-select: none;
+      font-size: 16px; font-weight: bold;
+      display: flex; align-items: center; justify-content: center;
+      user-select: none; -webkit-user-select: none;
       touch-action: none;
       text-shadow: 1px 1px 2px rgba(0,0,0,0.5);
     }
-    #jump-btn:active {
-      background: rgba(255,255,255,0.5);
-    }
+    #jump-btn:active { background: rgba(255,255,255,0.5); }
   </style>
 </head>
 <body>
   <div id="name-screen">
-    <h1>Enter your name</h1>
+    <h1>JOIN GAME</h1>
     <input id="name-input" type="text" placeholder="Name" maxlength="16" autofocus>
+    <label>Shape</label>
+    <div class="option-row">
+      <button class="shape-btn selected" data-shape="box">Box</button>
+      <button class="shape-btn" data-shape="roundcube">Round</button>
+      <button class="shape-btn" data-shape="sphere">Ball</button>
+      <button class="shape-btn" data-shape="cylinder">Cyl</button>
+    </div>
+    <label>Color</label>
+    <div class="option-row">
+      <input type="color" id="color-picker" value="#4488ff">
+    </div>
+    <label>Skin image URL (optional)</label>
+    <input id="skin-image-input" type="text" placeholder="https://...">
     <button id="join-btn">JOIN</button>
   </div>
-  <div id="hud" style="display:none;">WASD to move &middot; Space to jump</div>
+  <div id="hud" style="display:none;">WASD to move &middot; Space to jump &middot; Shift to sprint</div>
+  <div id="leader-display"></div>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/cannon.js/0.6.2/cannon.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
   <script src="/socket.io/socket.io.js"></script>
   <script src="game.js"></script>
 </body>
