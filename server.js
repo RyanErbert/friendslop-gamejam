@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
@@ -10,7 +11,23 @@ const io = new Server(server);
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/levels', express.static(path.join(__dirname, 'levels')));
 
+let activeLevel = 'level_1.glb';
+
+app.get('/api/levels', (req, res) => {
+  try {
+    const files = fs.readdirSync(path.join(__dirname, 'levels')).filter(f => f.endsWith('.glb'));
+    res.json(files);
+  } catch (e) {
+    res.json(['level_1.glb']);
+  }
+});
+
+app.get('/api/game-state', (req, res) => {
+  res.json({ playerCount: readyIds.size, activeLevel });
+});
+
 const players = {};
+const readyIds = new Set();
 const COLORS = ['#ff4444', '#4488ff', '#44cc44', '#ffcc00'];
 let colorIndex = 0;
 
@@ -33,12 +50,16 @@ function randomSpawn() { return SPAWN_POINTS[Math.floor(Math.random() * SPAWN_PO
 // --- Oddball state ---
 let holderID = null;
 const scores = {};
+let tagCooldownUntil = 0;
+const TAG_COOLDOWN_MS = 4000;
 
 function pickRandomHolder() {
   const ids = Object.keys(players);
   if (ids.length === 0) { holderID = null; return; }
   holderID = ids[Math.floor(Math.random() * ids.length)];
+  tagCooldownUntil = Date.now() + TAG_COOLDOWN_MS;
   io.emit('holderChanged', holderID);
+  io.emit('tagCooldown', TAG_COOLDOWN_MS);
   io.emit('scores', scores);
 }
 
@@ -58,6 +79,16 @@ io.on('connection', (socket) => {
   players[socket.id] = { x: sp.x, y: sp.y, z: sp.z, color, type: 'box', name: 'Player', shape: 'box', skinColor: color, skinImage: '' };
   scores[socket.id] = 0;
 
+  socket.on('selectLevel', (level) => {
+    if (typeof level === 'string' && level.endsWith('.glb')) {
+      const othersReady = [...readyIds].filter(id => id !== socket.id).length;
+      if (othersReady === 0) {
+        activeLevel = level;
+        io.emit('levelChanged', activeLevel);
+      }
+    }
+  });
+
   socket.on('setType', (type) => {
     if (type === 'ball' || type === 'box') players[socket.id].type = type;
   });
@@ -74,6 +105,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('ready', () => {
+    readyIds.add(socket.id);
     console.log(`Player connected: ${socket.id} (${players[socket.id].name}, ${players[socket.id].shape})`);
     socket.emit('currentPlayers', { players, selfId: socket.id });
     socket.emit('holderChanged', holderID);
@@ -100,15 +132,19 @@ io.on('connection', (socket) => {
   });
 
   socket.on('tagPlayer', (targetId) => {
-    // Only holder can tag to pass the oddball
     if (socket.id !== holderID) return;
     if (!players[targetId]) return;
+    const now = Date.now();
+    if (now < tagCooldownUntil) return;
     holderID = targetId;
+    tagCooldownUntil = now + TAG_COOLDOWN_MS;
     io.emit('holderChanged', holderID);
+    io.emit('tagCooldown', TAG_COOLDOWN_MS);
   });
 
   socket.on('disconnect', () => {
     console.log(`Player disconnected: ${socket.id}`);
+    readyIds.delete(socket.id);
     delete players[socket.id];
     delete scores[socket.id];
     if (holderID === socket.id) pickRandomHolder();

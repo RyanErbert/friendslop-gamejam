@@ -135,25 +135,131 @@
       text-shadow: 1px 1px 2px rgba(0,0,0,0.5);
     }
     #jump-btn:active { background: rgba(255,255,255,0.5); }
+
+    /* Scoreboard */
+    #scoreboard {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(0,0,0,0.82);
+      border: 2px solid rgba(255,255,255,0.3);
+      border-radius: 10px;
+      padding: 16px 24px;
+      font-family: monospace;
+      color: white;
+      z-index: 20;
+      display: none;
+      min-width: 260px;
+      pointer-events: none;
+    }
+    #scoreboard h3 {
+      text-align: center;
+      margin: 0 0 10px 0;
+      font-size: 16px;
+      letter-spacing: 2px;
+      color: #aaa;
+      border-bottom: 1px solid rgba(255,255,255,0.2);
+      padding-bottom: 6px;
+    }
+    .sb-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+      font-size: 14px;
+    }
+    .sb-row.holder { color: #ff6666; }
+    .sb-row.leader { color: #ffd700; }
+    .sb-name { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sb-score { font-weight: bold; min-width: 40px; text-align: right; }
+
+    /* Meters */
+    .meter-wrap {
+      position: absolute;
+      bottom: 28px;
+      width: 180px;
+      height: 10px;
+      background: rgba(0,0,0,0.5);
+      border: 1px solid rgba(255,255,255,0.25);
+      border-radius: 5px;
+      overflow: hidden;
+      pointer-events: none;
+      z-index: 5;
+    }
+    #sprint-meter { left: calc(50% - 195px); }
+    #jump-meter   { left: calc(50% + 15px); }
+    .meter-fill {
+      height: 100%;
+      width: 100%;
+      border-radius: 4px;
+      transition: background-color 0.15s;
+    }
+    /* Level select */
+    #level-select {
+      display: none;
+      text-align: center;
+      margin-bottom: 12px;
+      max-width: 600px;
+    }
+    #level-select h2 {
+      font-size: 14px;
+      color: #888;
+      margin-bottom: 8px;
+      letter-spacing: 2px;
+    }
+    .level-grid {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .level-card {
+      cursor: pointer;
+      border: 2px solid #555;
+      border-radius: 8px;
+      overflow: hidden;
+      transition: border-color 0.15s, transform 0.15s;
+      background: rgba(0,0,0,0.3);
+    }
+    .level-card:hover {
+      border-color: #88aaff;
+      transform: scale(1.05);
+    }
+    .level-card.selected {
+      border-color: #4488ff;
+      box-shadow: 0 0 12px rgba(68,136,255,0.5);
+    }
+    .level-card canvas { display: block; }
+    .level-label {
+      padding: 4px 8px;
+      font-size: 12px;
+      text-align: center;
+      color: #ccc;
+      text-transform: capitalize;
+    }
+
+    .meter-label {
+      position: absolute;
+      top: -16px;
+      left: 0;
+      font-family: monospace;
+      font-size: 10px;
+      color: rgba(255,255,255,0.6);
+      pointer-events: none;
+    }
   </style>
 </head>
 <body>
   <div id="name-screen">
     <h1>JOIN GAME</h1>
     <input id="name-input" type="text" placeholder="Name" maxlength="16" autofocus>
-    <label>Shape</label>
-    <div class="option-row">
-      <button class="shape-btn selected" data-shape="box">Box</button>
-      <button class="shape-btn" data-shape="roundcube">Round</button>
-      <button class="shape-btn" data-shape="sphere">Ball</button>
-      <button class="shape-btn" data-shape="cylinder">Cyl</button>
-    </div>
     <label>Color</label>
     <div class="option-row">
       <input type="color" id="color-picker" value="#4488ff">
     </div>
     <label>Skin image URL (optional)</label>
     <input id="skin-image-input" type="text" placeholder="https://...">
+    <div id="level-select"></div>
     <button id="join-btn">JOIN</button>
   </div>
   <div id="hud" style="display:none;">WASD to move &middot; Space to jump &middot; Shift to sprint</div>

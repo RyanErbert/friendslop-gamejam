@@ -1,4 +1,4 @@
-const SPAWN_POINTS = [
+let SPAWN_POINTS = [
   { x: -39.64, y: 0.53, z: -31.33 },
   { x: -78.69, y: 0.53, z: -61.07 },
   { x: -57.51, y: 7.10, z: -60.48 },
@@ -15,12 +15,17 @@ const SPAWN_POINTS = [
 function randomSpawn() { return SPAWN_POINTS[Math.floor(Math.random() * SPAWN_POINTS.length)]; }
 
 const MOVE_FORCE = 60;
-const SPRINT_FORCE = 100;
+const SPRINT_FORCE = 120;
 const MAX_SPEED = 9;
-const SPRINT_SPEED = 14;
+const SPRINT_SPEED = 18;
 const JUMP_IMPULSE = 8;
 const JOYSTICK_DEADZONE = 0.15;
 const TAG_DISTANCE = 1.5;
+
+const TAG_COOLDOWN = 4;
+const SPRINT_DURATION = 4;
+const SPRINT_REFILL_TIME = 6;
+const JUMP_CD_AT_FULL = 5;
 
 const isMobile = /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
   || ('ontouchstart' in window);
@@ -48,11 +53,11 @@ const skyCanvas = document.createElement('canvas');
 skyCanvas.width = 1; skyCanvas.height = 256;
 const skyCtx = skyCanvas.getContext('2d');
 const skyGrad = skyCtx.createLinearGradient(0, 0, 0, 256);
-skyGrad.addColorStop(0, '#0a0a2e');    // dark top
-skyGrad.addColorStop(0.3, '#1a1a4e');  // deep blue
-skyGrad.addColorStop(0.6, '#2d4a7a');  // medium blue
-skyGrad.addColorStop(0.85, '#5a7faa'); // lighter horizon
-skyGrad.addColorStop(1, '#8ab4d4');    // bright horizon
+skyGrad.addColorStop(0, '#0a0a2e');
+skyGrad.addColorStop(0.3, '#1a1a4e');
+skyGrad.addColorStop(0.6, '#2d4a7a');
+skyGrad.addColorStop(0.85, '#5a7faa');
+skyGrad.addColorStop(1, '#8ab4d4');
 skyCtx.fillStyle = skyGrad;
 skyCtx.fillRect(0, 0, 1, 256);
 const skyTex = new THREE.CanvasTexture(skyCanvas);
@@ -72,13 +77,10 @@ sunLight.shadow.camera.top = 100;
 sunLight.shadow.camera.bottom = -100;
 scene.add(sunLight);
 
-// Hemisphere light for natural sky/ground tint
 const hemiLight = new THREE.HemisphereLight(0x87ceeb, 0x553322, 0.6);
 scene.add(hemiLight);
-
 scene.add(new THREE.AmbientLight(0xffffff, 0.3));
 
-// --- Sun visual (bright sphere in the sky) ---
 const sunGeo = new THREE.SphereGeometry(8, 16, 16);
 const sunMat = new THREE.MeshBasicMaterial({ color: 0xffffaa });
 const sunMesh = new THREE.Mesh(sunGeo, sunMat);
@@ -86,32 +88,42 @@ sunMesh.position.copy(sunLight.position);
 scene.add(sunMesh);
 
 let levelLoaded = false;
+let currentLevelObj = null;
 
-// --- Load GLB level ---
 const loader = new THREE.GLTFLoader();
-loader.load('/levels/level_1.glb', (gltf) => {
-  const level = gltf.scene;
-  level.traverse((child) => {
-    if (child.isMesh) {
-      child.receiveShadow = true;
-      child.castShadow = true;
-      // Add physics collision for level geometry
-      addLevelCollider(child);
-    }
+
+function loadGameLevel(filename) {
+  if (currentLevelObj) {
+    scene.remove(currentLevelObj);
+    currentLevelObj = null;
+  }
+  levelMeshes.length = 0;
+  levelLoaded = false;
+
+  loader.load('/levels/' + filename, (gltf) => {
+    const level = gltf.scene;
+    level.traverse((child) => {
+      if (child.isMesh) {
+        child.receiveShadow = true;
+        child.castShadow = true;
+        addLevelCollider(child);
+      }
+    });
+    scene.add(level);
+    currentLevelObj = level;
+    levelLoaded = true;
+  }, undefined, (err) => {
+    console.error('Failed to load level:', err);
+    const groundGeo = new THREE.PlaneGeometry(5000, 5000);
+    const groundMat = new THREE.MeshStandardMaterial({ color: 0x55aa55 });
+    const ground = new THREE.Mesh(groundGeo, groundMat);
+    ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+    currentLevelObj = ground;
+    levelLoaded = true;
   });
-  scene.add(level);
-  levelLoaded = true;
-}, undefined, (err) => {
-  console.error('Failed to load level:', err);
-  // Fallback ground plane
-  const groundGeo = new THREE.PlaneGeometry(5000, 5000);
-  const groundMat = new THREE.MeshStandardMaterial({ color: 0x55aa55 });
-  const ground = new THREE.Mesh(groundGeo, groundMat);
-  ground.rotation.x = -Math.PI / 2;
-  ground.receiveShadow = true;
-  scene.add(ground);
-  levelLoaded = true;
-});
+}
 
 // --- Cannon.js physics world ---
 const world = new CANNON.World();
@@ -129,14 +141,13 @@ world.addContactMaterial(new CANNON.ContactMaterial(playerMaterial, playerMateri
   friction: 0.3, restitution: 0.2
 }));
 
-// Dynamic ground plane — follows terrain height under the player
 const groundBody = new CANNON.Body({ mass: 0, material: groundMaterial });
 groundBody.addShape(new CANNON.Plane());
 groundBody.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -Math.PI / 2);
 groundBody.position.set(0, 0, 0);
 world.addBody(groundBody);
 
-// --- Raycast terrain detection (finds ground height + walls) ---
+// --- Raycast terrain detection ---
 const PLAYER_RADIUS = 0.5;
 const levelMeshes = [];
 
@@ -154,7 +165,6 @@ function raycastLevel(origin, direction, maxDist) {
   return hits.length > 0 ? hits[0] : null;
 }
 
-// Move the Cannon ground plane to match terrain height under the player
 function updateGroundPlane(body) {
   const p = body.position;
   const groundOrigin = new THREE.Vector3(p.x, p.y + 2, p.z);
@@ -164,13 +174,11 @@ function updateGroundPlane(body) {
     groundBody.position.y = groundHit.point.y;
     rayGrounded = (p.y - groundHit.point.y) < 0.7;
   } else {
-    // No ground below — put plane far below so player falls
     groundBody.position.y = -1000;
     rayGrounded = false;
   }
 }
 
-// Wall collision via raycast (Cannon can't do this with terrain)
 function resolveWallCollisions(body) {
   const p = body.position;
   const wallDirs = [
@@ -209,20 +217,38 @@ const remoteBodies = new Map();
 const outlineMeshes = new Map();
 let joystickX = 0, joystickZ = 0;
 let airTime = 0;
+let lastGroundedTime = 0;
+const COYOTE_TIME = 0.025;
 
 // --- Charge jump state ---
 const CHARGE_RATE = 3;
 const MAX_CHARGE_MULT = 4;
-const SUPERCHARGE_THRESHOLD = 2;
-const SUPERCHARGE_COOLDOWN = 5.5;
 let jumpCharge = 0;
 let isChargingJump = false;
-let superchargeCooldownTimer = 0;
+let jumpCooldownTimer = 0;
+let jumpCooldownMax = 0;
+
+// --- Sprint stamina state ---
+let sprintStamina = SPRINT_DURATION;
+let sprintExhausted = false;
+
+// --- Tag cooldown state ---
+let tagCooldownTimer = 0;
+
+// --- Ball morph state ---
+let sprintMorphT = 0;
+let originalSmoothing = 0.25;
+let morphedPhysicsToSphere = false;
+let speedCapCurrent = MAX_SPEED;
 
 // --- Oddball state ---
 let holderID = null;
 let allScores = {};
 let leaderID = null;
+
+// --- Spawn editor state ---
+const spawnMarkers = [];
+let spawnClickCooldown = 0;
 
 // --- Join screen ---
 const nameScreen = document.getElementById('name-screen');
@@ -233,19 +259,10 @@ const leaderDisplay = document.getElementById('leader-display');
 const colorPicker = document.getElementById('color-picker');
 const skinImageInput = document.getElementById('skin-image-input');
 let playerName = 'Player';
-let playerShape = 'box';
+let playerShape = 'roundcube';
 let playerColor = '#4488ff';
 let playerSkinImage = '';
 let gameStarted = false;
-
-// Shape selection buttons
-document.querySelectorAll('.shape-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.shape-btn').forEach(b => b.classList.remove('selected'));
-    btn.classList.add('selected');
-    playerShape = btn.dataset.shape;
-  });
-});
 
 function joinGame() {
   playerName = nameInput.value.trim().slice(0, 16) || 'Player';
@@ -254,6 +271,13 @@ function joinGame() {
   nameScreen.style.display = 'none';
   hud.style.display = '';
   leaderDisplay.style.display = '';
+
+  // Load the selected or active level
+  const levelToLoad = selectedLevel || serverActiveLevel || 'level_1.glb';
+  socket.emit('selectLevel', levelToLoad);
+  loadGameLevel(levelToLoad);
+  cleanupPreviews();
+
   gameStarted = true;
   clock.start();
   startGame();
@@ -261,6 +285,243 @@ function joinGame() {
 
 joinBtn.addEventListener('click', joinGame);
 nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') joinGame(); });
+
+// --- Scoreboard UI ---
+let tabHeld = false;
+document.addEventListener('keydown', (e) => {
+  if (e.code === 'Tab') { e.preventDefault(); tabHeld = true; }
+});
+document.addEventListener('keyup', (e) => {
+  if (e.code === 'Tab') { e.preventDefault(); tabHeld = false; }
+});
+
+const scoreboardEl = document.createElement('div');
+scoreboardEl.id = 'scoreboard';
+scoreboardEl.innerHTML = '<h3>PLAYERS</h3><div id="scoreboard-list"></div>';
+document.body.appendChild(scoreboardEl);
+
+function updateScoreboard() {
+  const list = document.getElementById('scoreboard-list');
+  if (!list) return;
+  const entries = [];
+  if (selfId) entries.push({ id: selfId, name: playerName, score: allScores[selfId] || 0 });
+  for (const [id, name] of playerNames) {
+    entries.push({ id, name, score: allScores[id] || 0 });
+  }
+  entries.sort((a, b) => b.score - a.score);
+  list.innerHTML = entries.map(e => {
+    const classes = [];
+    if (e.id === holderID) classes.push('holder');
+    if (e.id === leaderID) classes.push('leader');
+    return `<div class="sb-row ${classes.join(' ')}"><span class="sb-name">${e.id === leaderID ? '\u{1F451} ' : ''}${e.id === holderID ? '[IT] ' : ''}${e.name}</span><span class="sb-score">${e.score}</span></div>`;
+  }).join('');
+}
+
+// --- Meter UI ---
+function createMeter(id, label) {
+  const wrap = document.createElement('div');
+  wrap.className = 'meter-wrap';
+  wrap.id = id;
+  wrap.style.display = 'none';
+  const lbl = document.createElement('div');
+  lbl.className = 'meter-label';
+  lbl.textContent = label;
+  wrap.appendChild(lbl);
+  const fill = document.createElement('div');
+  fill.className = 'meter-fill';
+  wrap.appendChild(fill);
+  document.body.appendChild(wrap);
+  return { wrap, fill };
+}
+
+const sprintMeter = createMeter('sprint-meter', '\u{1F3C3} SPRINT');
+const jumpMeter = createMeter('jump-meter', '\u{1F998} JUMP');
+
+function updateMeters() {
+  // Sprint meter
+  sprintMeter.wrap.style.display = gameStarted ? '' : 'none';
+  const sprintPct = sprintStamina / SPRINT_DURATION;
+  sprintMeter.fill.style.width = (sprintPct * 100) + '%';
+  sprintMeter.fill.style.backgroundColor = sprintExhausted ? '#cc2222' : '#22cc44';
+
+  // Jump meter
+  jumpMeter.wrap.style.display = gameStarted ? '' : 'none';
+  if (jumpCooldownTimer > 0) {
+    const cdPct = jumpCooldownTimer / jumpCooldownMax;
+    jumpMeter.fill.style.width = (cdPct * 100) + '%';
+    jumpMeter.fill.style.backgroundColor = '#cc2222';
+  } else if (isChargingJump) {
+    const chargePct = (jumpCharge - 1) / (MAX_CHARGE_MULT - 1);
+    jumpMeter.fill.style.width = (chargePct * 100) + '%';
+    jumpMeter.fill.style.backgroundColor = '#22cc44';
+  } else {
+    jumpMeter.fill.style.width = '0%';
+    jumpMeter.fill.style.backgroundColor = '#22cc44';
+  }
+}
+
+// --- Level select system ---
+let selectedLevel = null;
+let serverActiveLevel = 'level_1.glb';
+const levelPreviews = [];
+let previewsActive = false;
+
+async function initLevelSelect() {
+  try {
+    const [levelsRes, stateRes] = await Promise.all([
+      fetch('/api/levels').then(r => r.json()),
+      fetch('/api/game-state').then(r => r.json())
+    ]);
+
+    serverActiveLevel = stateRes.activeLevel;
+    selectedLevel = serverActiveLevel;
+
+    const selectDiv = document.getElementById('level-select');
+    if (!selectDiv) return;
+
+    if (stateRes.playerCount > 0) {
+      selectDiv.style.display = 'none';
+      return;
+    }
+
+    if (levelsRes.length <= 1) {
+      selectDiv.style.display = 'none';
+      selectedLevel = levelsRes[0] || 'level_1.glb';
+      return;
+    }
+
+    selectDiv.style.display = 'block';
+    selectDiv.innerHTML = '<h2>SELECT LEVEL</h2><div class="level-grid"></div>';
+    const grid = selectDiv.querySelector('.level-grid');
+
+    for (const filename of levelsRes) {
+      const preview = createLevelPreview(filename, grid);
+      levelPreviews.push(preview);
+
+      preview.wrapper.addEventListener('click', () => {
+        selectedLevel = filename;
+        for (const p of levelPreviews) {
+          p.wrapper.classList.toggle('selected', p.filename === filename);
+        }
+      });
+
+      if (filename === selectedLevel) {
+        preview.wrapper.classList.add('selected');
+      }
+    }
+
+    previewsActive = true;
+    animatePreviews();
+  } catch (e) {
+    console.error('Level select init failed:', e);
+    selectedLevel = 'level_1.glb';
+  }
+}
+
+function createLevelPreview(filename, container) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 220;
+  canvas.height = 160;
+
+  const pRenderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+  pRenderer.setSize(220, 160);
+
+  const pScene = new THREE.Scene();
+  pScene.background = new THREE.Color(0x1a1a2e);
+  const pCamera = new THREE.PerspectiveCamera(50, 220 / 160, 0.1, 10000);
+
+  pScene.add(new THREE.AmbientLight(0xffffff, 0.5));
+  const pDirLight = new THREE.DirectionalLight(0xfff4e0, 1.2);
+  pDirLight.position.set(1, 2, 1);
+  pScene.add(pDirLight);
+  pScene.add(new THREE.HemisphereLight(0x87ceeb, 0x553322, 0.4));
+
+  let levelGroup = null;
+
+  const pLoader = new THREE.GLTFLoader();
+  pLoader.load('/levels/' + filename, (gltf) => {
+    levelGroup = gltf.scene;
+    pScene.add(levelGroup);
+
+    const box = new THREE.Box3().setFromObject(levelGroup);
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
+
+    levelGroup.position.sub(center);
+
+    const fov = pCamera.fov * (Math.PI / 180);
+    const camDist = (maxDim / (2 * Math.tan(fov / 2))) * 1.4;
+    pCamera.position.set(0, maxDim * 0.3, camDist);
+    pCamera.lookAt(0, 0, 0);
+    pCamera.far = camDist * 4;
+    pCamera.updateProjectionMatrix();
+  });
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'level-card';
+  wrapper.appendChild(canvas);
+  const label = document.createElement('div');
+  label.className = 'level-label';
+  label.textContent = filename.replace('.glb', '').replace(/_/g, ' ');
+  wrapper.appendChild(label);
+  container.appendChild(wrapper);
+
+  return { renderer: pRenderer, scene: pScene, camera: pCamera, getGroup: () => levelGroup, wrapper, filename };
+}
+
+function animatePreviews() {
+  if (!previewsActive) return;
+  requestAnimationFrame(animatePreviews);
+  for (const p of levelPreviews) {
+    const g = p.getGroup();
+    if (g) g.rotation.y += 0.003;
+    p.renderer.render(p.scene, p.camera);
+  }
+}
+
+function cleanupPreviews() {
+  previewsActive = false;
+  for (const p of levelPreviews) {
+    p.renderer.dispose();
+  }
+  levelPreviews.length = 0;
+}
+
+initLevelSelect();
+
+// --- Score sprite for leader ---
+function createScoreSprite() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 128; canvas.height = 32;
+  const ctx = canvas.getContext('2d');
+  const texture = new THREE.CanvasTexture(canvas);
+  const mat = new THREE.SpriteMaterial({ map: texture, depthTest: false });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(1.5, 0.35, 1);
+  sprite.renderOrder = 999;
+  sprite.visible = false;
+  sprite.userData.canvas = canvas;
+  sprite.userData.ctx = ctx;
+  return sprite;
+}
+
+function updateScoreSpriteText(sprite, score) {
+  const canvas = sprite.userData.canvas;
+  const ctx = sprite.userData.ctx;
+  ctx.clearRect(0, 0, 128, 32);
+  ctx.font = 'bold 22px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd700';
+  ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+  ctx.lineWidth = 3;
+  ctx.strokeText(String(score), 64, 24);
+  ctx.fillText(String(score), 64, 24);
+  sprite.material.map.needsUpdate = true;
+}
+
+const playerScoreSprites = new Map();
+let localScoreSprite = null;
 
 // --- Mobile controls ---
 if (isMobile) {
@@ -324,6 +585,7 @@ if (isMobile) {
   window.addEventListener('keydown', (e) => {
     keys[e.code] = true;
     if (e.code === 'Space') e.preventDefault();
+    if (e.code === 'Tab') e.preventDefault();
     if (e.altKey || e.code.startsWith('F')) {
       if (document.pointerLockElement) e.preventDefault();
     }
@@ -356,21 +618,28 @@ function createNameSprite(name) {
   return sprite;
 }
 
-// --- Crown sprite for leader ---
+// --- Crown sprite for leader (big, always visible) ---
 function createCrownSprite() {
   const canvas = document.createElement('canvas');
-  canvas.width = 128; canvas.height = 64;
+  canvas.width = 256; canvas.height = 128;
   const ctx = canvas.getContext('2d');
-  ctx.font = '48px serif';
+  ctx.font = '96px serif';
   ctx.textAlign = 'center';
-  ctx.fillText('\u{1F451}', 64, 48);
+  ctx.fillText('\u{1F451}', 128, 100);
   const texture = new THREE.CanvasTexture(canvas);
   const mat = new THREE.SpriteMaterial({ map: texture, depthTest: false });
   const sprite = new THREE.Sprite(mat);
-  sprite.scale.set(1, 0.5, 1);
+  sprite.scale.set(2, 1, 1);
   sprite.renderOrder = 999;
   sprite.visible = false;
   return sprite;
+}
+
+function updateCrownScale(crown, playerPos) {
+  if (!crown || !crown.visible) return;
+  const dist = camera.position.distanceTo(playerPos);
+  const s = Math.max(2, dist * 0.15);
+  crown.scale.set(s, s * 0.5, 1);
 }
 
 // --- Outline mesh for "it" player ---
@@ -389,30 +658,41 @@ function createOutlineMesh(sourceMesh) {
 // --- Player geometry by shape ---
 function createShapeGeo(shape) {
   switch (shape) {
-    case 'roundcube': return new THREE.BoxGeometry(1, 1, 1, 4, 4, 4);
+    case 'roundcube': return new THREE.BoxGeometry(1, 1, 1, 8, 8, 8);
     case 'sphere': return new THREE.SphereGeometry(0.5, 24, 24);
-    case 'cylinder': return new THREE.CylinderGeometry(0.4, 0.4, 1, 16);
+    case 'cylinder': return new THREE.CylinderGeometry(0.5, 0.5, 1, 16);
     default: return new THREE.BoxGeometry(1, 1, 1);
   }
+}
+
+function createRoundcubePhysicsShape(smoothing) {
+  if (smoothing < 0.75) {
+    const s = 0.5 * (1 - smoothing * 0.3);
+    return new CANNON.Box(new CANNON.Vec3(s, s, s));
+  }
+  const r = 0.5 * (0.85 + smoothing * 0.15);
+  return new CANNON.Sphere(r);
 }
 
 function createPhysicsShape(shape) {
   switch (shape) {
     case 'sphere': return new CANNON.Sphere(0.5);
-    case 'cylinder': return new CANNON.Cylinder(0.4, 0.4, 1, 16);
-    case 'roundcube': return new CANNON.Box(new CANNON.Vec3(0.5, 0.5, 0.5));
+    case 'cylinder': return new CANNON.Cylinder(0.5, 0.5, 1, 16);
+    case 'roundcube': return createRoundcubePhysicsShape(roundcubeSmoothing);
     default: return new CANNON.Box(new CANNON.Vec3(0.5, 0.5, 0.5));
   }
 }
 
-// Smooth roundcube vertices
+let roundcubeSmoothing = 0.25;
 function smoothRoundcube(geo) {
   const pos = geo.attributes.position;
-  const v = new THREE.Vector3();
+  const box = new THREE.Vector3();
+  const sphere = new THREE.Vector3();
   for (let i = 0; i < pos.count; i++) {
-    v.fromBufferAttribute(pos, i);
-    v.normalize().multiplyScalar(0.58);
-    pos.setXYZ(i, v.x, v.y, v.z);
+    box.fromBufferAttribute(pos, i);
+    sphere.copy(box).normalize().multiplyScalar(0.5);
+    box.lerp(sphere, roundcubeSmoothing);
+    pos.setXYZ(i, box.x, box.y, box.z);
   }
   geo.computeVertexNormals();
   return geo;
@@ -443,24 +723,80 @@ function createPlayerVisual(color, shape, name, skinImage) {
   label.position.y = 1.2;
   group.add(label);
 
+  const scoreSprite = createScoreSprite();
+  scoreSprite.position.y = 1.55;
+  group.add(scoreSprite);
+
   const crown = createCrownSprite();
-  crown.position.y = 1.6;
+  crown.position.y = 2.1;
   group.add(crown);
 
   scene.add(group);
-  return { group, mesh, outline, crown };
+  return { group, mesh, outline, crown, scoreSprite };
 }
 
 function createPlayerBody(shape, isLocal) {
+  const angDamp = (shape === 'sphere' || shape === 'cylinder') ? 0.6 : 0.05;
   const body = new CANNON.Body({
     mass: isLocal ? 1 : 0,
     material: playerMaterial,
     shape: createPhysicsShape(shape),
     linearDamping: 0.1,
-    angularDamping: 0.05
+    angularDamping: angDamp
   });
   world.addBody(body);
   return body;
+}
+
+// --- Ball morph (animated roundcube → sphere transition) ---
+function updateSprintMorph() {
+  if (!localMesh || playerShape !== 'roundcube') return;
+
+  const targetSmoothing = originalSmoothing + (1 - originalSmoothing) * sprintMorphT;
+  roundcubeSmoothing = targetSmoothing;
+
+  const oldGeo = localMesh.geometry;
+  let geo = new THREE.BoxGeometry(1, 1, 1, 8, 8, 8);
+  geo = smoothRoundcube(geo);
+  localMesh.geometry = geo;
+  oldGeo.dispose();
+  const outline = localMesh.children.find(c => c.isMesh);
+  if (outline) {
+    const oldOutGeo = outline.geometry;
+    outline.geometry = geo.clone();
+    oldOutGeo.dispose();
+  }
+
+  const shouldBeSphere = roundcubeSmoothing >= 0.75;
+  if (shouldBeSphere && !morphedPhysicsToSphere) {
+    morphedPhysicsToSphere = true;
+    rebuildSprintPhysics();
+  } else if (!shouldBeSphere && morphedPhysicsToSphere) {
+    morphedPhysicsToSphere = false;
+    rebuildSprintPhysics();
+  }
+}
+
+function rebuildSprintPhysics() {
+  if (!localBody) return;
+  const pos = localBody.position.clone();
+  const vel = localBody.velocity.clone();
+  const angVel = localBody.angularVelocity.clone();
+  const quat = localBody.quaternion.clone();
+  world.removeBody(localBody);
+  const isSpherePhysics = roundcubeSmoothing >= 0.75;
+  localBody = new CANNON.Body({
+    mass: godmode ? 0 : 1,
+    material: playerMaterial,
+    shape: createRoundcubePhysicsShape(roundcubeSmoothing),
+    linearDamping: 0.1,
+    angularDamping: isSpherePhysics ? 0.6 : 0.05
+  });
+  localBody.position.copy(pos);
+  localBody.velocity.copy(vel);
+  localBody.angularVelocity.copy(angVel);
+  localBody.quaternion.copy(quat);
+  world.addBody(localBody);
 }
 
 // --- Ground check ---
@@ -484,6 +820,40 @@ function handleMovement(delta) {
   const inputLen = Math.sqrt(inputX * inputX + inputZ * inputZ);
   const grounded = checkGrounded();
 
+  // Sprint stamina
+  const wantsSprint = keys['ShiftLeft'] || keys['ShiftRight'];
+  const sprinting = wantsSprint && !sprintExhausted && inputLen > 0;
+
+  if (sprinting) {
+    sprintStamina -= delta;
+    if (sprintStamina <= 0) {
+      sprintStamina = 0;
+      sprintExhausted = true;
+    }
+  } else {
+    const refillRate = SPRINT_DURATION / SPRINT_REFILL_TIME;
+    sprintStamina = Math.min(SPRINT_DURATION, sprintStamina + refillRate * delta);
+    if (sprintExhausted && sprintStamina >= SPRINT_DURATION) {
+      sprintExhausted = false;
+    }
+  }
+
+  // Animated ball morph while sprinting (roundcube only)
+  const wantBall = sprinting && inputLen > 0;
+  if (playerShape === 'roundcube') {
+    const prevT = sprintMorphT;
+    if (wantBall && sprintMorphT < 1) {
+      sprintMorphT = Math.min(1, sprintMorphT + 3 * delta);
+    } else if (!wantBall && sprintMorphT > 0) {
+      sprintMorphT = Math.max(0, sprintMorphT - 3 * delta);
+    }
+    if (sprintMorphT !== prevT) updateSprintMorph();
+  }
+
+  // Smooth speed cap transition
+  const targetCap = sprinting ? SPRINT_SPEED : MAX_SPEED;
+  speedCapCurrent += (targetCap - speedCapCurrent) * Math.min(1, 2.5 * delta);
+
   if (inputLen > 0) {
     const inputMag = Math.min(inputLen, 1);
     const nx = inputX / inputLen;
@@ -497,38 +867,57 @@ function handleMovement(delta) {
     const worldX = right.x * nx + forward.x * (-nz);
     const worldZ = right.z * nx + forward.z * (-nz);
 
-    const sprinting = keys['ShiftLeft'] || keys['ShiftRight'];
     const force = sprinting ? SPRINT_FORCE : MOVE_FORCE;
 
     localBody.applyForce(new CANNON.Vec3(worldX * force * inputMag, 0, worldZ * force * inputMag), localBody.position);
-
-    const cap = sprinting ? SPRINT_SPEED : MAX_SPEED;
-    const vx = localBody.velocity.x, vz = localBody.velocity.z;
-    const hSpeed = Math.sqrt(vx * vx + vz * vz);
-    if (hSpeed > cap) {
-      localBody.velocity.x = (vx / hSpeed) * cap;
-      localBody.velocity.z = (vz / hSpeed) * cap;
-    }
   }
 
-  if (superchargeCooldownTimer > 0) superchargeCooldownTimer -= delta;
+  // Always apply gradual speed cap
+  const vx = localBody.velocity.x, vz = localBody.velocity.z;
+  const hSpeed = Math.sqrt(vx * vx + vz * vz);
+  if (hSpeed > speedCapCurrent) {
+    localBody.velocity.x = (vx / hSpeed) * speedCapCurrent;
+    localBody.velocity.z = (vz / hSpeed) * speedCapCurrent;
+  }
 
-  if (keys['Space'] && grounded) {
+  // Jump cooldown tick
+  if (jumpCooldownTimer > 0) {
+    jumpCooldownTimer -= delta;
+    if (jumpCooldownTimer < 0) jumpCooldownTimer = 0;
+  }
+
+  // Track coyote time
+  const now = performance.now() / 1000;
+  if (grounded) lastGroundedTime = now;
+  const timeSinceGrounded = now - lastGroundedTime;
+  const canJump = timeSinceGrounded < COYOTE_TIME;
+
+  // Charge while grounded (or within coyote window) and space held
+  if (keys['Space'] && canJump && jumpCooldownTimer <= 0) {
     if (!isChargingJump) {
       isChargingJump = true;
       jumpCharge = 1;
     }
-    const chargeLimit = superchargeCooldownTimer > 0 ? SUPERCHARGE_THRESHOLD : MAX_CHARGE_MULT;
-    jumpCharge = Math.min(jumpCharge + CHARGE_RATE * delta, chargeLimit);
-  } else if (isChargingJump) {
-    localBody.velocity.y = JUMP_IMPULSE * jumpCharge;
-    if (jumpCharge > SUPERCHARGE_THRESHOLD) superchargeCooldownTimer = SUPERCHARGE_COOLDOWN;
+    jumpCharge = Math.min(jumpCharge + CHARGE_RATE * delta, MAX_CHARGE_MULT);
+  }
+
+  // Jump fires ONLY on space release
+  if (!keys['Space'] && isChargingJump) {
+    if (canJump) {
+      localBody.velocity.y = JUMP_IMPULSE * jumpCharge;
+      const chargeNorm = (jumpCharge - 1) / (MAX_CHARGE_MULT - 1);
+      jumpCooldownMax = chargeNorm * JUMP_CD_AT_FULL;
+      jumpCooldownTimer = jumpCooldownMax;
+    }
     isChargingJump = false;
     jumpCharge = 0;
   }
 
-  // Auto-tag: if holder bumps into another player
-  if (holderID === selfId) {
+  // Tag cooldown tick
+  if (tagCooldownTimer > 0) tagCooldownTimer -= delta;
+
+  // Auto-tag: if holder bumps into another player (respect cooldown)
+  if (holderID === selfId && tagCooldownTimer <= 0) {
     for (const [id, group] of remotePlayers) {
       const dx = localBody.position.x - group.position.x;
       const dy = localBody.position.y - group.position.y;
@@ -548,8 +937,9 @@ function syncMeshToBody(group, mesh, body) {
 }
 
 // --- Camera ---
-let chainLength = 6;
-let camHeight = 3.5;
+let BASE_CHAIN_LENGTH = 10;
+let chainLength = BASE_CHAIN_LENGTH;
+let camHeight = 5.8;
 let camYaw = Math.PI;
 let camPitch = 0.4;
 const CAM_PITCH_MIN = -0.3;
@@ -559,12 +949,12 @@ const CAM_DRAG_SPEED = 1.8;
 let lastMouseMoveTime = 0;
 const MOUSE_IDLE_DELAY = 0.6;
 
-// Pointer lock (with click-drag fallback)
 let mouseDragging = false;
 let pointerLockSupported = false;
 
 renderer.domElement.addEventListener('click', () => {
-  if (!pointerLockSupported) return; // use drag fallback
+  if (!pointerLockSupported) return;
+  if (godmode) return;
   renderer.domElement.requestPointerLock();
 });
 
@@ -577,6 +967,10 @@ document.addEventListener('pointerlockerror', () => {
 
 renderer.domElement.addEventListener('mousedown', (e) => {
   if (document.pointerLockElement === renderer.domElement) return;
+  if (godmode) {
+    if (e.button === 2) mouseDragging = true;
+    return;
+  }
   if (e.button === 0 || e.button === 2) mouseDragging = true;
 });
 window.addEventListener('mouseup', () => { mouseDragging = false; });
@@ -594,63 +988,109 @@ document.addEventListener('mousemove', (e) => {
     camera.rotation.z = 0;
   } else {
     camYaw -= e.movementX * MOUSE_SENSITIVITY;
-    camPitch -= e.movementY * MOUSE_SENSITIVITY;
+    camPitch += e.movementY * MOUSE_SENSITIVITY;
     camPitch = Math.max(CAM_PITCH_MIN, Math.min(CAM_PITCH_MAX, camPitch));
   }
 });
 
-// Mouse wheel zoom
 window.addEventListener('wheel', (e) => {
   if (!gameStarted || godmode) return;
-  chainLength += e.deltaY * 0.005;
-  chainLength = Math.max(2, Math.min(20, chainLength));
-  camHeight = chainLength * 0.58;
+  BASE_CHAIN_LENGTH += e.deltaY * 0.005;
+  BASE_CHAIN_LENGTH = Math.max(2, Math.min(20, BASE_CHAIN_LENGTH));
 }, { passive: true });
 
-// God mode: left-click to place spawn diamond and log coordinates
+// --- Spawn point editor ---
 const spawnDiamondGeo = new THREE.OctahedronGeometry(0.4, 0);
 const spawnDiamondMat = new THREE.MeshStandardMaterial({ color: 0x00ffcc, emissive: 0x00aa88, emissiveIntensity: 0.6 });
 const spawnClickRaycaster = new THREE.Raycaster();
 const spawnClickNDC = new THREE.Vector2();
 
+function createSpawnMarker(pt) {
+  const diamond = new THREE.Mesh(spawnDiamondGeo, spawnDiamondMat.clone());
+  diamond.position.set(pt.x, pt.y + 1.5, pt.z);
+  diamond.scale.set(1, 1.5, 1);
+  diamond.userData.spawnPoint = pt;
+  scene.add(diamond);
+  spawnMarkers.push(diamond);
+  return diamond;
+}
+
+function showSpawnMarkers() {
+  for (const sp of SPAWN_POINTS) {
+    createSpawnMarker(sp);
+  }
+}
+
+function hideSpawnMarkers() {
+  for (const m of spawnMarkers) {
+    scene.remove(m);
+  }
+  spawnMarkers.length = 0;
+}
+
 renderer.domElement.addEventListener('click', (e) => {
   if (!godmode) return;
+
+  const now = performance.now() / 1000;
+
   spawnClickNDC.x = (e.clientX / window.innerWidth) * 2 - 1;
   spawnClickNDC.y = -(e.clientY / window.innerHeight) * 2 + 1;
   spawnClickRaycaster.setFromCamera(spawnClickNDC, camera);
   spawnClickRaycaster.far = 500;
+
+  // Check if clicking on an existing spawn marker to remove it
+  const markerHits = spawnClickRaycaster.intersectObjects(spawnMarkers, false);
+  if (markerHits.length > 0) {
+    const hitMarker = markerHits[0].object;
+    const sp = hitMarker.userData.spawnPoint;
+    SPAWN_POINTS = SPAWN_POINTS.filter(p => p !== sp);
+    scene.remove(hitMarker);
+    const idx = spawnMarkers.indexOf(hitMarker);
+    if (idx !== -1) spawnMarkers.splice(idx, 1);
+    console.log(`REMOVED SPAWN POINT: { x: ${sp.x.toFixed(2)}, y: ${sp.y.toFixed(2)}, z: ${sp.z.toFixed(2)} } — ${SPAWN_POINTS.length} remaining`);
+    return;
+  }
+
+  // Cooldown for placement
+  if (now - spawnClickCooldown < 0.5) return;
+  spawnClickCooldown = now;
+
+  // Place new spawn point
   const hits = spawnClickRaycaster.intersectObjects(levelMeshes, false);
   if (hits.length === 0) return;
   const pt = hits[0].point;
-  const diamond = new THREE.Mesh(spawnDiamondGeo, spawnDiamondMat);
-  diamond.position.set(pt.x, pt.y + 1.5, pt.z);
-  diamond.scale.set(1, 1.5, 1);
-  scene.add(diamond);
-  console.log(`SPAWN POINT: { x: ${pt.x.toFixed(2)}, y: ${pt.y.toFixed(2)}, z: ${pt.z.toFixed(2)} }`);
+  const newSp = { x: parseFloat(pt.x.toFixed(2)), y: parseFloat(pt.y.toFixed(2)), z: parseFloat(pt.z.toFixed(2)) };
+  SPAWN_POINTS.push(newSp);
+  createSpawnMarker(newSp);
+  console.log(`SPAWN POINT ADDED: { x: ${newSp.x}, y: ${newSp.y}, z: ${newSp.z} } — ${SPAWN_POINTS.length} total`);
 });
 
-// Disable context menu on canvas so right-drag works
 renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
 
 function updateCamera(delta) {
   if (godmode || !localPlayer) return;
 
-  // Drag cam yaw toward "behind the player" when moving and mouse is idle
+  let playerSpeed = 0;
   if (localBody) {
     const vx = localBody.velocity.x;
     const vz = localBody.velocity.z;
-    const hSpeed = Math.sqrt(vx * vx + vz * vz);
+    playerSpeed = Math.sqrt(vx * vx + vz * vz);
     const now = performance.now() / 1000;
     const mouseIdle = (now - lastMouseMoveTime) > MOUSE_IDLE_DELAY;
 
-    if (hSpeed > 1.5 && mouseIdle) {
+    if (playerSpeed > 1.5 && mouseIdle) {
       const behindYaw = Math.atan2(vx, vz) + Math.PI;
       let diff = behindYaw - camYaw;
-      // Normalize to [-PI, PI]
       diff = diff - Math.round(diff / (2 * Math.PI)) * 2 * Math.PI;
       camYaw += diff * CAM_DRAG_SPEED * delta;
     }
   }
+
+  // Sprint camera pull-away: chain extends with speed, giving a "catching up" feel
+  const speedExtra = Math.max(0, playerSpeed - MAX_SPEED) * 0.4;
+  const targetChain = BASE_CHAIN_LENGTH + speedExtra;
+  chainLength += (targetChain - chainLength) * Math.min(1, 2 * delta);
+  camHeight = chainLength * 0.58;
 
   const offsetX = Math.sin(camYaw) * Math.cos(camPitch) * chainLength;
   const offsetZ = Math.cos(camYaw) * Math.cos(camPitch) * chainLength;
@@ -660,11 +1100,17 @@ function updateCamera(delta) {
   const targetY = localPlayer.position.y + offsetY + 1.5;
   const targetZ = localPlayer.position.z + offsetZ;
 
-  camera.position.x += (targetX - camera.position.x) * 0.15;
-  camera.position.y += (targetY - camera.position.y) * 0.15;
-  camera.position.z += (targetZ - camera.position.z) * 0.15;
+  // Frame-rate independent exponential smoothing
+  // Slower follow when sprinting = camera lags behind, feels like it's catching up
+  const speedFactor = Math.min(1, playerSpeed / SPRINT_SPEED);
+  const baseLerp = 1 - Math.exp(-6 * delta);
+  const camLerp = baseLerp * (1 - speedFactor * 0.4);
 
-  camera.lookAt(localPlayer.position);
+  camera.position.x += (targetX - camera.position.x) * camLerp;
+  camera.position.y += (targetY - camera.position.y) * camLerp;
+  camera.position.z += (targetZ - camera.position.z) * camLerp;
+
+  camera.lookAt(localPlayer.position.x, localPlayer.position.y + 1.0, localPlayer.position.z);
 }
 
 // --- Oddball visuals ---
@@ -686,6 +1132,16 @@ function updateOddballVisuals() {
     crown.visible = (id === leaderID);
   }
 
+  // Update score sprites — only leader shows score above head
+  if (localScoreSprite) {
+    localScoreSprite.visible = (leaderID === selfId);
+    if (leaderID === selfId) updateScoreSpriteText(localScoreSprite, allScores[selfId] || 0);
+  }
+  for (const [id, ss] of playerScoreSprites) {
+    ss.visible = (id === leaderID);
+    if (id === leaderID) updateScoreSpriteText(ss, allScores[id] || 0);
+  }
+
   // Update leader display
   if (leaderID && allScores[leaderID] > 0) {
     const leaderName = getPlayerName(leaderID);
@@ -697,7 +1153,6 @@ function updateOddballVisuals() {
 
 function getPlayerName(id) {
   if (id === selfId) return playerName;
-  // Check the name from the label sprite — stored in playerNames
   return playerNames.get(id) || 'Player';
 }
 
@@ -708,6 +1163,70 @@ function findLeader() {
   leaderID = null;
   for (const [id, score] of Object.entries(allScores)) {
     if (score > maxScore) { maxScore = score; leaderID = id; }
+  }
+}
+
+// --- Tag cooldown strobe ---
+function updateTagStrobe() {
+  if (tagCooldownTimer <= 0) return;
+
+  const t = performance.now() * 0.012;
+  const r = Math.sin(t) * 0.5 + 0.5;
+  const g = Math.sin(t + 2.1) * 0.5 + 0.5;
+  const b = Math.sin(t + 4.2) * 0.5 + 0.5;
+
+  // Strobe the holder's outline
+  if (holderID === selfId && localOutline) {
+    localOutline.visible = true;
+    localOutline.material.color.setRGB(r, g, b);
+  }
+  for (const [id, outline] of playerOutlines) {
+    if (id === holderID) {
+      outline.visible = true;
+      outline.material.color.setRGB(r, g, b);
+    }
+  }
+}
+
+function resetOutlineColors() {
+  if (localOutline) localOutline.material.color.set(0xffffff);
+  for (const [id, outline] of playerOutlines) {
+    outline.material.color.set(0xffffff);
+  }
+}
+
+// --- Crown distance scaling ---
+function scaleLeaderSprites(playerPos, nameSprite, scoreSprite, crown) {
+  const dist = camera.position.distanceTo(playerPos);
+  const s = Math.max(2, dist * 0.15);
+  if (crown && crown.visible) crown.scale.set(s, s * 0.5, 1);
+  if (nameSprite) nameSprite.scale.set(s, s * 0.25, 1);
+  if (scoreSprite && scoreSprite.visible) scoreSprite.scale.set(s * 0.75, s * 0.2, 1);
+}
+
+function resetLabelScale(nameSprite) {
+  if (nameSprite) nameSprite.scale.set(2, 0.5, 1);
+}
+
+function updateCrowns() {
+  // Scale leader's name, score, crown with distance. Reset non-leaders to default.
+  if (localPlayer) {
+    const nameLabel = localPlayer.children.find(c => c.isSprite && c !== localCrown && c !== localScoreSprite);
+    if (leaderID === selfId) {
+      scaleLeaderSprites(localPlayer.position, nameLabel, localScoreSprite, localCrown);
+    } else {
+      resetLabelScale(nameLabel);
+    }
+  }
+  for (const [id, group] of remotePlayers) {
+    const crown = playerCrowns.get(id);
+    const ss = playerScoreSprites.get(id);
+    const nameLabel = group.children.find(c => c.isSprite && c !== crown && c !== ss);
+    if (id === leaderID) {
+      scaleLeaderSprites(group.position, nameLabel, ss, crown);
+    } else {
+      resetLabelScale(nameLabel);
+    }
   }
 }
 
@@ -726,13 +1245,14 @@ socket.on('currentPlayers', (data) => {
   for (const [id, info] of Object.entries(data.players)) {
     const shape = info.shape || info.type || 'box';
     const color = info.skinColor || info.color;
-    const { group, mesh, outline, crown } = createPlayerVisual(color, shape, info.name, info.skinImage);
+    const { group, mesh, outline, crown, scoreSprite } = createPlayerVisual(color, shape, info.name, info.skinImage);
     group.position.set(info.x, info.y, info.z);
     if (id === selfId) {
       localPlayer = group;
       localMesh = mesh;
       localOutline = outline;
       localCrown = crown;
+      localScoreSprite = scoreSprite;
       localBody = createPlayerBody(shape, true);
       const sp = randomSpawn();
       localBody.position.set(sp.x, sp.y, sp.z);
@@ -742,6 +1262,7 @@ socket.on('currentPlayers', (data) => {
       remoteMeshes.set(id, mesh);
       playerOutlines.set(id, outline);
       playerCrowns.set(id, crown);
+      playerScoreSprites.set(id, scoreSprite);
       playerNames.set(id, info.name);
     }
   }
@@ -750,12 +1271,13 @@ socket.on('currentPlayers', (data) => {
 socket.on('newPlayer', (data) => {
   const shape = data.shape || data.type || 'box';
   const color = data.skinColor || data.color;
-  const { group, mesh, outline, crown } = createPlayerVisual(color, shape, data.name, data.skinImage);
+  const { group, mesh, outline, crown, scoreSprite } = createPlayerVisual(color, shape, data.name, data.skinImage);
   group.position.set(data.x, data.y, data.z);
   remotePlayers.set(data.id, group);
   remoteMeshes.set(data.id, mesh);
   playerOutlines.set(data.id, outline);
   playerCrowns.set(data.id, crown);
+  playerScoreSprites.set(data.id, scoreSprite);
   playerNames.set(data.id, data.name);
 });
 
@@ -774,6 +1296,7 @@ socket.on('playerDisconnected', (id) => {
     remoteTargets.delete(id);
     playerOutlines.delete(id);
     playerCrowns.delete(id);
+    playerScoreSprites.delete(id);
     playerNames.delete(id);
   }
 });
@@ -783,10 +1306,19 @@ socket.on('holderChanged', (id) => {
   updateOddballVisuals();
 });
 
+socket.on('tagCooldown', (ms) => {
+  tagCooldownTimer = ms / 1000;
+  resetOutlineColors();
+});
+
 socket.on('scores', (s) => {
   allScores = s;
   findLeader();
   updateOddballVisuals();
+});
+
+socket.on('levelChanged', (level) => {
+  if (gameStarted) loadGameLevel(level);
 });
 
 function sendPosition() {
@@ -817,7 +1349,6 @@ function handleGodmode(delta) {
   camera.position.y += my * godCamSpeed * delta;
   camera.position.z += (right.z * mx + forward.z * (-mz)) * godCamSpeed * delta;
 
-  // Arrow keys to rotate camera
   if (keys['ArrowLeft']) camera.rotation.y += 2 * delta;
   if (keys['ArrowRight']) camera.rotation.y -= 2 * delta;
   if (keys['ArrowUp']) camera.rotation.x += 1.5 * delta;
@@ -834,17 +1365,16 @@ debugEl.style.cssText = 'position:absolute;top:10px;right:10px;color:#0f0;font:1
 document.body.appendChild(debugEl);
 
 window.addEventListener('keydown', (e) => {
-  if (e.code === 'F3') { 
-    e.preventDefault(); 
-    debugVisible = !debugVisible; 
-    debugEl.style.display = debugVisible ? '' : 'none'; 
-    gimbal.visible = debugVisible; 
+  if (e.code === 'F3') {
+    e.preventDefault();
+    debugVisible = !debugVisible;
+    debugEl.style.display = debugVisible ? '' : 'none';
+    gimbal.visible = debugVisible;
   }
   if (e.code === 'F4' && gameStarted) {
     e.preventDefault();
     godmode = !godmode;
     if (godmode && localBody) {
-      // Capture current view direction and convert to YXZ euler cleanly
       const dir = new THREE.Vector3();
       camera.getWorldDirection(dir);
       const yaw = Math.atan2(-dir.x, -dir.z);
@@ -853,6 +1383,10 @@ window.addEventListener('keydown', (e) => {
       camera.rotation.set(pitch, yaw, 0);
       localBody.mass = 0;
       localBody.updateMassProperties();
+      // Show spawn markers
+      showSpawnMarkers();
+      // Exit pointer lock so clicks work for spawn editing
+      if (document.pointerLockElement) document.exitPointerLock();
     } else if (!godmode && localBody) {
       const dir = new THREE.Vector3();
       camera.getWorldDirection(dir);
@@ -873,17 +1407,64 @@ window.addEventListener('keydown', (e) => {
       const toPlayer = new THREE.Vector3().subVectors(localPlayer.position, camera.position);
       camYaw = Math.atan2(toPlayer.x, toPlayer.z);
       camPitch = 0.4;
+      // Hide spawn markers
+      hideSpawnMarkers();
     }
   }
-  if (e.code === 'BracketRight') { chainLength = Math.min(20, chainLength + 0.5); camHeight = chainLength * 0.58; }
-  if (e.code === 'BracketLeft') { chainLength = Math.max(2, chainLength - 0.5); camHeight = chainLength * 0.58; }
+  if (e.code === 'BracketRight') { BASE_CHAIN_LENGTH = Math.min(20, BASE_CHAIN_LENGTH + 0.5); }
+  if (e.code === 'BracketLeft') { BASE_CHAIN_LENGTH = Math.max(2, BASE_CHAIN_LENGTH - 0.5); }
+  if (e.code === 'Comma' && playerShape === 'roundcube' && localMesh) {
+    roundcubeSmoothing = Math.max(0, roundcubeSmoothing - 0.05);
+    originalSmoothing = roundcubeSmoothing;
+    rebuildLocalRoundcube();
+  }
+  if (e.code === 'Period' && playerShape === 'roundcube' && localMesh) {
+    roundcubeSmoothing = Math.min(1, roundcubeSmoothing + 0.05);
+    originalSmoothing = roundcubeSmoothing;
+    rebuildLocalRoundcube();
+  }
 });
+
+function rebuildLocalRoundcube() {
+  if (!localMesh) return;
+  const oldGeo = localMesh.geometry;
+  let geo = new THREE.BoxGeometry(1, 1, 1, 8, 8, 8);
+  geo = smoothRoundcube(geo);
+  localMesh.geometry = geo;
+  oldGeo.dispose();
+  const outline = localMesh.children.find(c => c.isMesh);
+  if (outline) {
+    const oldOutGeo = outline.geometry;
+    outline.geometry = geo.clone();
+    oldOutGeo.dispose();
+  }
+  if (localBody) {
+    const pos = localBody.position.clone();
+    const vel = localBody.velocity.clone();
+    const angVel = localBody.angularVelocity.clone();
+    const quat = localBody.quaternion.clone();
+    world.removeBody(localBody);
+    const isSpherePhysics = roundcubeSmoothing >= 0.75;
+    localBody = new CANNON.Body({
+      mass: 1,
+      material: playerMaterial,
+      shape: createRoundcubePhysicsShape(roundcubeSmoothing),
+      linearDamping: 0.1,
+      angularDamping: isSpherePhysics ? 0.6 : 0.05
+    });
+    localBody.position.copy(pos);
+    localBody.velocity.copy(vel);
+    localBody.angularVelocity.copy(angVel);
+    localBody.quaternion.copy(quat);
+    world.addBody(localBody);
+  }
+}
 
 let fpsFrames = 0, fpsTime = 0, fpsDisplay = 0;
 
 function updateDebug(delta) {
   if (!debugVisible) return;
-  
+
   gimbal.quaternion.copy(camera.quaternion).invert();
 
   fpsFrames++; fpsTime += delta;
@@ -898,7 +1479,8 @@ function updateDebug(delta) {
       `CamPos: (${c.x.toFixed(2)}, ${c.y.toFixed(2)}, ${c.z.toFixed(2)})\n` +
       `CamRot: (${r.x.toFixed(2)}, ${r.y.toFixed(2)}, ${r.z.toFixed(2)})\n` +
       `WASD: fly  E/Q/Shift: up/down\n` +
-      `Arrows/Mouse: rotate camera\n` +
+      `Click: place spawn  Click marker: remove\n` +
+      `Spawns: ${SPAWN_POINTS.length}\n` +
       `Chain:  ${chainLength.toFixed(1)} [ / ] to adjust`;
     return;
   }
@@ -907,7 +1489,7 @@ function updateDebug(delta) {
   const v = localBody.velocity;
   const hSpeed = Math.sqrt(v.x * v.x + v.z * v.z);
   const totalSpeed = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
-  const sprinting = keys['ShiftLeft'] || keys['ShiftRight'];
+  const sprinting = (keys['ShiftLeft'] || keys['ShiftRight']) && !sprintExhausted;
   const p = localBody.position;
   const myScore = allScores[selfId] || 0;
   debugEl.textContent =
@@ -915,10 +1497,13 @@ function updateDebug(delta) {
     `Speed: ${hSpeed.toFixed(2)} / ${sprinting ? SPRINT_SPEED : MAX_SPEED}\n` +
     `Vel:   (${v.x.toFixed(2)}, ${v.y.toFixed(2)}, ${v.z.toFixed(2)}) |${totalSpeed.toFixed(2)}|\n` +
     `Pos:   (${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)})\n` +
-    `State: ${sprinting ? 'SPRINT' : 'walk'}${checkGrounded() ? '' : ' (air)'}\n` +
-    `Jump:  ${isChargingJump ? '>' + '='.repeat(Math.round(jumpCharge * 5)) + ' ' + jumpCharge.toFixed(1) + 'x' : (superchargeCooldownTimer > 0 ? 'CD ' + superchargeCooldownTimer.toFixed(1) + 's' : 'ready')}\n` +
+    `State: ${sprinting ? 'SPRINT' : 'walk'}${sprintExhausted ? ' (exhausted)' : ''}${checkGrounded() ? '' : ' (air)'}\n` +
+    `Sprint:${sprintStamina.toFixed(1)}/${SPRINT_DURATION}s\n` +
+    `Jump:  ${isChargingJump ? '>' + '='.repeat(Math.round(jumpCharge * 5)) + ' ' + jumpCharge.toFixed(1) + 'x' : (jumpCooldownTimer > 0 ? 'CD ' + jumpCooldownTimer.toFixed(1) + 's' : 'ready')}\n` +
+    `Tag CD:${tagCooldownTimer > 0 ? tagCooldownTimer.toFixed(1) + 's' : 'none'}\n` +
     `Score: ${myScore}  ${holderID === selfId ? '[IT]' : ''}\n` +
     `Chain: ${chainLength.toFixed(1)} [ / ] to adjust\n` +
+    (playerShape === 'roundcube' ? `Round: ${roundcubeSmoothing.toFixed(2)} < / > to adjust\n` : '') +
     `F4: godmode`;
 }
 
@@ -933,15 +1518,16 @@ function animate() {
   if (gameStarted && localBody) {
     if (godmode) {
       handleGodmode(delta);
+      // Spin spawn markers
+      for (const m of spawnMarkers) {
+        m.rotation.y += delta * 1.5;
+      }
     } else {
       handleMovement(delta);
-      // Move Cannon ground plane to terrain height, then step physics
       updateGroundPlane(localBody);
       if (levelLoaded) world.step(PHYSICS_STEP, delta, 3);
-      // Wall collisions via raycast after physics step
       resolveWallCollisions(localBody);
       syncMeshToBody(localPlayer, localMesh, localBody);
-      // Respawn if falling too long
       if (checkGrounded()) {
         airTime = 0;
       } else {
@@ -972,6 +1558,23 @@ function animate() {
     updateCamera(delta);
     sendPosition();
     updateDebug(delta);
+
+    // Tag strobe effect
+    updateTagStrobe();
+
+    // Crown scaling
+    updateCrowns();
+
+    // Meters
+    updateMeters();
+
+    // Tab scoreboard
+    if (tabHeld) {
+      scoreboardEl.style.display = 'block';
+      updateScoreboard();
+    } else {
+      scoreboardEl.style.display = 'none';
+    }
   }
 
   renderer.render(scene, camera);
