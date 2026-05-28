@@ -1,3 +1,19 @@
+const SPAWN_POINTS = [
+  { x: -39.64, y: 0.53, z: -31.33 },
+  { x: -78.69, y: 0.53, z: -61.07 },
+  { x: -57.51, y: 7.10, z: -60.48 },
+  { x: -2.64, y: 0.53, z: -255.53 },
+  { x: -46.90, y: 0.53, z: -309.56 },
+  { x: -49.36, y: 0.46, z: -193.42 },
+  { x: 46.60, y: 15.12, z: -173.82 },
+  { x: 22.30, y: 0.53, z: -89.89 },
+  { x: -81.11, y: 3.84, z: -464.15 },
+  { x: -76.45, y: 0.53, z: -383.61 },
+  { x: -60.66, y: 10.85, z: -160.14 },
+  { x: -15.82, y: 35.39, z: -24.13 },
+];
+function randomSpawn() { return SPAWN_POINTS[Math.floor(Math.random() * SPAWN_POINTS.length)]; }
+
 const MOVE_FORCE = 60;
 const SPRINT_FORCE = 100;
 const MAX_SPEED = 9;
@@ -194,6 +210,15 @@ const outlineMeshes = new Map();
 let joystickX = 0, joystickZ = 0;
 let airTime = 0;
 
+// --- Charge jump state ---
+const CHARGE_RATE = 3;
+const MAX_CHARGE_MULT = 4;
+const SUPERCHARGE_THRESHOLD = 2;
+const SUPERCHARGE_COOLDOWN = 5.5;
+let jumpCharge = 0;
+let isChargingJump = false;
+let superchargeCooldownTimer = 0;
+
 // --- Oddball state ---
 let holderID = null;
 let allScores = {};
@@ -343,6 +368,7 @@ function createCrownSprite() {
   const mat = new THREE.SpriteMaterial({ map: texture, depthTest: false });
   const sprite = new THREE.Sprite(mat);
   sprite.scale.set(1, 0.5, 1);
+  sprite.renderOrder = 999;
   sprite.visible = false;
   return sprite;
 }
@@ -485,9 +511,20 @@ function handleMovement(delta) {
     }
   }
 
+  if (superchargeCooldownTimer > 0) superchargeCooldownTimer -= delta;
+
   if (keys['Space'] && grounded) {
-    localBody.velocity.y = JUMP_IMPULSE;
-    keys['Space'] = false;
+    if (!isChargingJump) {
+      isChargingJump = true;
+      jumpCharge = 1;
+    }
+    const chargeLimit = superchargeCooldownTimer > 0 ? SUPERCHARGE_THRESHOLD : MAX_CHARGE_MULT;
+    jumpCharge = Math.min(jumpCharge + CHARGE_RATE * delta, chargeLimit);
+  } else if (isChargingJump) {
+    localBody.velocity.y = JUMP_IMPULSE * jumpCharge;
+    if (jumpCharge > SUPERCHARGE_THRESHOLD) superchargeCooldownTimer = SUPERCHARGE_COOLDOWN;
+    isChargingJump = false;
+    jumpCharge = 0;
   }
 
   // Auto-tag: if holder bumps into another player
@@ -556,6 +593,36 @@ document.addEventListener('mousemove', (e) => {
     camPitch -= e.movementY * MOUSE_SENSITIVITY;
     camPitch = Math.max(CAM_PITCH_MIN, Math.min(CAM_PITCH_MAX, camPitch));
   }
+});
+
+// Mouse wheel zoom
+window.addEventListener('wheel', (e) => {
+  if (!gameStarted || godmode) return;
+  chainLength += e.deltaY * 0.005;
+  chainLength = Math.max(2, Math.min(20, chainLength));
+  camHeight = chainLength * 0.58;
+}, { passive: true });
+
+// God mode: left-click to place spawn diamond and log coordinates
+const spawnDiamondGeo = new THREE.OctahedronGeometry(0.4, 0);
+const spawnDiamondMat = new THREE.MeshStandardMaterial({ color: 0x00ffcc, emissive: 0x00aa88, emissiveIntensity: 0.6 });
+const spawnClickRaycaster = new THREE.Raycaster();
+const spawnClickNDC = new THREE.Vector2();
+
+renderer.domElement.addEventListener('click', (e) => {
+  if (!godmode) return;
+  spawnClickNDC.x = (e.clientX / window.innerWidth) * 2 - 1;
+  spawnClickNDC.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  spawnClickRaycaster.setFromCamera(spawnClickNDC, camera);
+  spawnClickRaycaster.far = 500;
+  const hits = spawnClickRaycaster.intersectObjects(levelMeshes, false);
+  if (hits.length === 0) return;
+  const pt = hits[0].point;
+  const diamond = new THREE.Mesh(spawnDiamondGeo, spawnDiamondMat);
+  diamond.position.set(pt.x, pt.y + 1.5, pt.z);
+  diamond.scale.set(1, 1.5, 1);
+  scene.add(diamond);
+  console.log(`SPAWN POINT: { x: ${pt.x.toFixed(2)}, y: ${pt.y.toFixed(2)}, z: ${pt.z.toFixed(2)} }`);
 });
 
 // Disable context menu on canvas so right-drag works
@@ -646,8 +713,9 @@ socket.on('currentPlayers', (data) => {
       localOutline = outline;
       localCrown = crown;
       localBody = createPlayerBody(shape, true);
-      localBody.position.set(info.x, info.y || 45, info.z);
-      camera.position.set(info.x, (info.y || 45) + camHeight, info.z + chainLength);
+      const sp = randomSpawn();
+      localBody.position.set(sp.x, sp.y, sp.z);
+      camera.position.set(sp.x, sp.y + camHeight, sp.z + chainLength);
     } else {
       remotePlayers.set(id, group);
       remoteMeshes.set(id, mesh);
@@ -765,15 +833,25 @@ window.addEventListener('keydown', (e) => {
       localBody.mass = 0;
       localBody.updateMassProperties();
     } else if (!godmode && localBody) {
+      const dir = new THREE.Vector3();
+      camera.getWorldDirection(dir);
+      const spawnDist = 5;
+      localBody.position.set(
+        camera.position.x + dir.x * spawnDist,
+        camera.position.y + dir.y * spawnDist,
+        camera.position.z + dir.z * spawnDist
+      );
       localBody.velocity.set(0, 0, 0);
       localBody.angularVelocity.set(0, 0, 0);
       localBody.mass = 1;
       localBody.updateMassProperties();
-      // Reset camera fully — lookAt will set proper rotation on next frame
       camera.rotation.order = 'XYZ';
       camera.up.set(0, 1, 0);
       camera.quaternion.identity();
       camera.rotation.set(0, 0, 0);
+      const toPlayer = new THREE.Vector3().subVectors(localPlayer.position, camera.position);
+      camYaw = Math.atan2(toPlayer.x, toPlayer.z);
+      camPitch = 0.4;
     }
   }
   if (e.code === 'BracketRight') { chainLength = Math.min(20, chainLength + 0.5); camHeight = chainLength * 0.58; }
@@ -817,6 +895,7 @@ function updateDebug(delta) {
     `Vel:   (${v.x.toFixed(2)}, ${v.y.toFixed(2)}, ${v.z.toFixed(2)}) |${totalSpeed.toFixed(2)}|\n` +
     `Pos:   (${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)})\n` +
     `State: ${sprinting ? 'SPRINT' : 'walk'}${checkGrounded() ? '' : ' (air)'}\n` +
+    `Jump:  ${isChargingJump ? '>' + '='.repeat(Math.round(jumpCharge * 5)) + ' ' + jumpCharge.toFixed(1) + 'x' : (superchargeCooldownTimer > 0 ? 'CD ' + superchargeCooldownTimer.toFixed(1) + 's' : 'ready')}\n` +
     `Score: ${myScore}  ${holderID === selfId ? '[IT]' : ''}\n` +
     `Chain: ${chainLength.toFixed(1)} [ / ] to adjust\n` +
     `F4: godmode`;
@@ -848,7 +927,8 @@ function animate() {
         airTime += delta;
       }
       if (airTime > 5) {
-        localBody.position.set(0, 45, 0);
+        const rsp = randomSpawn();
+        localBody.position.set(rsp.x, rsp.y, rsp.z);
         localBody.velocity.set(0, 0, 0);
         localBody.angularVelocity.set(0, 0, 0);
         airTime = 0;

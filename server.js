@@ -14,6 +14,22 @@ const players = {};
 const COLORS = ['#ff4444', '#4488ff', '#44cc44', '#ffcc00'];
 let colorIndex = 0;
 
+const SPAWN_POINTS = [
+  { x: -39.64, y: 0.53, z: -31.33 },
+  { x: -78.69, y: 0.53, z: -61.07 },
+  { x: -57.51, y: 7.10, z: -60.48 },
+  { x: -2.64, y: 0.53, z: -255.53 },
+  { x: -46.90, y: 0.53, z: -309.56 },
+  { x: -49.36, y: 0.46, z: -193.42 },
+  { x: 46.60, y: 15.12, z: -173.82 },
+  { x: 22.30, y: 0.53, z: -89.89 },
+  { x: -81.11, y: 3.84, z: -464.15 },
+  { x: -76.45, y: 0.53, z: -383.61 },
+  { x: -60.66, y: 10.85, z: -160.14 },
+  { x: -15.82, y: 35.39, z: -24.13 },
+];
+function randomSpawn() { return SPAWN_POINTS[Math.floor(Math.random() * SPAWN_POINTS.length)]; }
+
 // --- Oddball state ---
 let holderID = null;
 const scores = {};
@@ -38,7 +54,8 @@ io.on('connection', (socket) => {
   const color = COLORS[colorIndex % COLORS.length];
   colorIndex++;
 
-  players[socket.id] = { x: 0, y: 45, z: 0, color, type: 'box', name: 'Player', shape: 'box', skinColor: color, skinImage: '' };
+  const sp = randomSpawn();
+  players[socket.id] = { x: sp.x, y: sp.y, z: sp.z, color, type: 'box', name: 'Player', shape: 'box', skinColor: color, skinImage: '' };
   scores[socket.id] = 0;
 
   socket.on('setType', (type) => {
