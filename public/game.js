@@ -443,8 +443,8 @@ function createMeter(id, label) {
   return { wrap, fill };
 }
 
-const sprintMeter = createMeter('sprint-meter', '>> SPRINT');
-const jumpMeter = createMeter('jump-meter', '^ JUMP');
+const sprintMeter = createMeter('sprint-meter', '⚡︎ SPRINT');
+const jumpMeter = createMeter('jump-meter', '⬆︎ JUMP');
 
 function updateMeters() {
   // Sprint meter
@@ -1059,9 +1059,14 @@ function handleMovement(delta) {
   }
 }
 
+const VISUAL_SMOOTH = 0.45;
+const _syncPos = new THREE.Vector3();
+const _syncQuat = new THREE.Quaternion();
 function syncMeshToBody(group, mesh, body) {
-  group.position.copy(body.position);
-  mesh.quaternion.copy(body.quaternion);
+  _syncPos.set(body.position.x, body.position.y, body.position.z);
+  _syncQuat.set(body.quaternion.x, body.quaternion.y, body.quaternion.z, body.quaternion.w);
+  group.position.lerp(_syncPos, VISUAL_SMOOTH);
+  mesh.quaternion.slerp(_syncQuat, VISUAL_SMOOTH);
 }
 
 // --- Camera ---
@@ -1344,16 +1349,33 @@ function resetOutlineColors() {
 }
 
 // --- Crown distance scaling ---
+const BASE_NAME_Y = 1.2;
+const BASE_SCORE_Y = 1.55;
+const BASE_CROWN_Y = 2.1;
+
 function scaleLeaderSprites(playerPos, nameSprite, scoreSprite, crown) {
   const dist = camera.position.distanceTo(playerPos);
-  const s = Math.max(2, dist * 0.15);
-  if (crown && crown.visible) crown.scale.set(s, s * 0.5, 1);
-  if (nameSprite) nameSprite.scale.set(s, s * 0.25, 1);
-  if (scoreSprite && scoreSprite.visible) scoreSprite.scale.set(s * 0.75, s * 0.2, 1);
+  const s = Math.max(2, Math.min(dist * 0.15, 6));
+  const ratio = s / 2;
+  if (nameSprite) {
+    nameSprite.scale.set(s, s * 0.25, 1);
+    nameSprite.position.y = BASE_NAME_Y;
+  }
+  if (scoreSprite && scoreSprite.visible) {
+    scoreSprite.scale.set(s * 0.75, s * 0.2, 1);
+    scoreSprite.position.y = BASE_NAME_Y + 0.45 * ratio;
+  }
+  if (crown && crown.visible) {
+    crown.scale.set(s, s * 0.5, 1);
+    crown.position.y = BASE_NAME_Y + 1.1 * ratio;
+  }
 }
 
 function resetLabelScale(nameSprite) {
-  if (nameSprite) nameSprite.scale.set(2, 0.5, 1);
+  if (nameSprite) {
+    nameSprite.scale.set(2, 0.5, 1);
+    nameSprite.position.y = BASE_NAME_Y;
+  }
 }
 
 function updateCrowns() {
