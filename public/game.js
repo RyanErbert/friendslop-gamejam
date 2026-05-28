@@ -1,17 +1,37 @@
-let SPAWN_POINTS = [
-  { x: -39.64, y: 0.53, z: -31.33 },
-  { x: -78.69, y: 0.53, z: -61.07 },
-  { x: -57.51, y: 7.10, z: -60.48 },
-  { x: -2.64, y: 0.53, z: -255.53 },
-  { x: -46.90, y: 0.53, z: -309.56 },
-  { x: -49.36, y: 0.46, z: -193.42 },
-  { x: 46.60, y: 15.12, z: -173.82 },
-  { x: 22.30, y: 0.53, z: -89.89 },
-  { x: -81.11, y: 3.84, z: -464.15 },
-  { x: -76.45, y: 0.53, z: -383.61 },
-  { x: -60.66, y: 10.85, z: -160.14 },
-  { x: -15.82, y: 35.39, z: -24.13 },
-];
+const LEVEL_SPAWN_POINTS = {
+  'level_1.glb': [
+    { x: -39.64, y: 0.53, z: -31.33 },
+    { x: -78.69, y: 0.53, z: -61.07 },
+    { x: -57.51, y: 7.10, z: -60.48 },
+    { x: -2.64, y: 0.53, z: -255.53 },
+    { x: -46.90, y: 0.53, z: -309.56 },
+    { x: -49.36, y: 0.46, z: -193.42 },
+    { x: 46.60, y: 15.12, z: -173.82 },
+    { x: 22.30, y: 0.53, z: -89.89 },
+    { x: -81.11, y: 3.84, z: -464.15 },
+    { x: -76.45, y: 0.53, z: -383.61 },
+    { x: -60.66, y: 10.85, z: -160.14 },
+    { x: -15.82, y: 35.39, z: -24.13 },
+  ],
+  'level_2.glb': [
+    { x: -4.43, y: 161.88, z: -21.1 },
+    { x: -5.72, y: 160.66, z: -3.36 },
+    { x: 22.12, y: 168.59, z: 3.8 },
+    { x: 24.99, y: 160.97, z: 3.07 },
+    { x: -27.36, y: 161.88, z: 3.34 },
+    { x: -27.66, y: 149.69, z: -28.19 },
+    { x: -4.56, y: 145.73, z: -17.8 },
+    { x: -4.86, y: 154.87, z: 1.14 },
+    { x: 12.11, y: 160.05, z: 22.92 },
+    { x: 37.7, y: 163.56, z: 20.13 },
+    { x: 37.88, y: 163.56, z: -5.22 },
+    { x: -34.88, y: 161.88, z: 18.03 },
+    { x: 16.88, y: 151.22, z: 22.6 },
+    { x: 13.89, y: 155.79, z: -3.39 },
+  ],
+};
+let currentLevelName = 'level_1.glb';
+let SPAWN_POINTS = LEVEL_SPAWN_POINTS['level_1.glb'];
 function randomSpawn() { return SPAWN_POINTS[Math.floor(Math.random() * SPAWN_POINTS.length)]; }
 
 const MOVE_FORCE = 60;
@@ -121,6 +141,8 @@ function loadGameLevel(filename) {
   }
   levelMeshes.length = 0;
   levelLoaded = false;
+  currentLevelName = filename;
+  SPAWN_POINTS = LEVEL_SPAWN_POINTS[filename] || LEVEL_SPAWN_POINTS['level_1.glb'];
 
   loader.load('/levels/' + filename, (gltf) => {
     const level = gltf.scene;
@@ -222,6 +244,19 @@ function resolveWallCollisions(body) {
         body.velocity.x -= dir.x * velDot;
         body.velocity.z -= dir.z * velDot;
       }
+    }
+  }
+
+  // Ceiling collision — prevent jumping through ceilings
+  const ceilOrigin = new THREE.Vector3(p.x, p.y + 0.3, p.z);
+  const ceilHit = raycastLevel(ceilOrigin, new THREE.Vector3(0, 1, 0), PLAYER_RADIUS + 0.5);
+  if (ceilHit) {
+    const headroom = ceilHit.distance;
+    if (headroom < PLAYER_RADIUS + 0.1) {
+      p.y = ceilHit.point.y - PLAYER_RADIUS - 0.1;
+    }
+    if (body.velocity.y > 0) {
+      body.velocity.y = 0;
     }
   }
 }
@@ -1207,7 +1242,22 @@ function updateCamera(delta) {
   const targetY = cameraLookAtTarget.y + 0.5 + offsetY;
   const targetZ = localPlayer.position.z + offsetZ;
 
-  camera.position.lerp(new THREE.Vector3(targetX, targetY, targetZ), camLerp);
+  const desiredPos = new THREE.Vector3(targetX, targetY, targetZ);
+
+  // Camera wall collision — pull camera closer if environment is between player and camera
+  const camOrigin = new THREE.Vector3().copy(cameraLookAtTarget);
+  const camDir = new THREE.Vector3().subVectors(desiredPos, camOrigin);
+  const camDist = camDir.length();
+  if (camDist > 0.1) {
+    camDir.normalize();
+    const camHit = raycastLevel(camOrigin, camDir, camDist);
+    if (camHit) {
+      const safeDist = Math.max(0.5, camHit.distance - 0.3);
+      desiredPos.copy(camOrigin).addScaledVector(camDir, safeDist);
+    }
+  }
+
+  camera.position.lerp(desiredPos, camLerp);
   camera.lookAt(cameraLookAtTarget);
 }
 
