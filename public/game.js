@@ -555,6 +555,9 @@ let camPitch = 0.4;
 const CAM_PITCH_MIN = -0.3;
 const CAM_PITCH_MAX = 1.2;
 const MOUSE_SENSITIVITY = 0.003;
+const CAM_DRAG_SPEED = 1.8;
+let lastMouseMoveTime = 0;
+const MOUSE_IDLE_DELAY = 0.6;
 
 // Pointer lock (with click-drag fallback)
 let mouseDragging = false;
@@ -581,6 +584,7 @@ window.addEventListener('mouseup', () => { mouseDragging = false; });
 document.addEventListener('mousemove', (e) => {
   const hasLock = document.pointerLockElement === renderer.domElement;
   if (!hasLock && !mouseDragging) return;
+  lastMouseMoveTime = performance.now() / 1000;
 
   if (godmode) {
     camera.rotation.order = 'YXZ';
@@ -630,6 +634,23 @@ renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
 
 function updateCamera(delta) {
   if (godmode || !localPlayer) return;
+
+  // Drag cam yaw toward "behind the player" when moving and mouse is idle
+  if (localBody) {
+    const vx = localBody.velocity.x;
+    const vz = localBody.velocity.z;
+    const hSpeed = Math.sqrt(vx * vx + vz * vz);
+    const now = performance.now() / 1000;
+    const mouseIdle = (now - lastMouseMoveTime) > MOUSE_IDLE_DELAY;
+
+    if (hSpeed > 1.5 && mouseIdle) {
+      const behindYaw = Math.atan2(vx, vz) + Math.PI;
+      let diff = behindYaw - camYaw;
+      // Normalize to [-PI, PI]
+      diff = diff - Math.round(diff / (2 * Math.PI)) * 2 * Math.PI;
+      camYaw += diff * CAM_DRAG_SPEED * delta;
+    }
+  }
 
   const offsetX = Math.sin(camYaw) * Math.cos(camPitch) * chainLength;
   const offsetZ = Math.cos(camYaw) * Math.cos(camPitch) * chainLength;
