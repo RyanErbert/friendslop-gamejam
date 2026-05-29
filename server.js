@@ -12,6 +12,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.use('/levels', express.static(path.join(__dirname, 'levels')));
 app.use('/music', express.static(path.join(__dirname, 'music')));
 app.use('/sound', express.static(path.join(__dirname, 'sound')));
+app.use('/prefabs', express.static(path.join(__dirname, 'prefabs')));
 
 let activeLevel = 'level_1.glb';
 
@@ -68,6 +69,9 @@ const LEVEL_SPAWN_POINTS = {
 function getSpawnPoints() { return LEVEL_SPAWN_POINTS[activeLevel] || LEVEL_SPAWN_POINTS['level_1.glb']; }
 function randomSpawn() { const pts = getSpawnPoints(); return pts[Math.floor(Math.random() * pts.length)]; }
 
+// --- Pedestal state ---
+const pedestals = [];
+
 // --- Oddball state ---
 let holderID = null;
 const scores = {};
@@ -91,6 +95,22 @@ setInterval(() => {
     io.emit('scores', scores);
   }
 }, 1000);
+
+// Server-side inactivity tracking
+const lastActivity = {};
+const INACTIVITY_LIMIT = 5 * 60 * 1000;
+
+setInterval(() => {
+  const now = Date.now();
+  for (const id of readyIds) {
+    if (lastActivity[id] && now - lastActivity[id] > INACTIVITY_LIMIT) {
+      console.log(`Kicking idle player: ${id}`);
+      const sock = io.sockets.sockets.get(id);
+      if (sock) sock.emit('kicked', 'inactivity');
+      if (sock) sock.disconnect(true);
+    }
+  }
+}, 30000);
 
 io.on('connection', (socket) => {
   const color = COLORS[colorIndex % COLORS.length];
@@ -127,10 +147,12 @@ io.on('connection', (socket) => {
 
   socket.on('ready', () => {
     readyIds.add(socket.id);
+    lastActivity[socket.id] = Date.now();
     console.log(`Player connected: ${socket.id} (${players[socket.id].name}, ${players[socket.id].shape})`);
     socket.emit('currentPlayers', { players, selfId: socket.id });
     socket.emit('holderChanged', holderID);
     socket.emit('scores', scores);
+    socket.emit('currentPedestals', pedestals);
     socket.broadcast.emit('newPlayer', { id: socket.id, ...players[socket.id] });
 
     // First player becomes holder
@@ -139,6 +161,7 @@ io.on('connection', (socket) => {
 
   socket.on('playerMoved', (data) => {
     if (!players[socket.id]) return;
+    lastActivity[socket.id] = Date.now();
     players[socket.id].x = data.x;
     players[socket.id].y = data.y;
     players[socket.id].z = data.z;
@@ -147,10 +170,28 @@ io.on('connection', (socket) => {
     players[socket.id].qz = data.qz || 0;
     players[socket.id].qw = data.qw || 1;
     players[socket.id].smoothing = data.smoothing;
+    players[socket.id].godmode = !!data.godmode;
     socket.broadcast.emit('playerMoved', {
       id: socket.id, x: data.x, y: data.y, z: data.z,
-      qx: data.qx, qy: data.qy, qz: data.qz, qw: data.qw, smoothing: data.smoothing
+      qx: data.qx, qy: data.qy, qz: data.qz, qw: data.qw,
+      smoothing: data.smoothing, godmode: !!data.godmode
     });
+  });
+
+  socket.on('placePedestal', (data) => {
+    if (!players[socket.id]) return;
+    const ped = { x: data.x, y: data.y, z: data.z, id: Date.now() + '_' + socket.id };
+    pedestals.push(ped);
+    io.emit('pedestalPlaced', ped);
+    console.log(`PEDESTAL PLACED at (${ped.x.toFixed(2)}, ${ped.y.toFixed(2)}, ${ped.z.toFixed(2)}) by ${players[socket.id].name}`);
+  });
+
+  socket.on('removePedestal', (pedId) => {
+    const idx = pedestals.findIndex(p => p.id === pedId);
+    if (idx !== -1) {
+      pedestals.splice(idx, 1);
+      io.emit('pedestalRemoved', pedId);
+    }
   });
 
   socket.on('tagPlayer', (targetId) => {
@@ -177,6 +218,7 @@ io.on('connection', (socket) => {
     readyIds.delete(socket.id);
     delete players[socket.id];
     delete scores[socket.id];
+    delete lastActivity[socket.id];
     if (holderID === socket.id) pickRandomHolder();
     io.emit('playerDisconnected', socket.id);
     io.emit('scores', scores);

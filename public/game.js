@@ -349,6 +349,353 @@ function playRandomJumpSound(position) {
   playWorldSound(sound, position, JUMP_SOUND_BASE_VOLUME);
 }
 
+// --- Inactivity timeout ---
+const INACTIVITY_TIMEOUT = 5 * 60 * 1000;
+const INACTIVITY_WARNING = 30 * 1000;
+let lastActivityTime = Date.now();
+let inactivityWarningShown = false;
+
+const inactivityBanner = document.createElement('div');
+inactivityBanner.id = 'inactivity-banner';
+inactivityBanner.style.cssText = 'position:absolute;top:0;left:0;right:0;padding:12px;background:rgba(255,60,60,0.9);color:white;font:14px "04b_03",Lato,sans-serif;text-align:center;z-index:100;display:none;pointer-events:none;';
+document.body.appendChild(inactivityBanner);
+
+function resetActivity() {
+  lastActivityTime = Date.now();
+  if (inactivityWarningShown) {
+    inactivityWarningShown = false;
+    inactivityBanner.style.display = 'none';
+  }
+}
+
+function returnToMenu() {
+  if (godmode && localBody) {
+    godmode = false;
+    localBody.mass = 1;
+    localBody.updateMassProperties();
+    hideSpawnMarkers();
+    hideGodmodeMenu();
+    hideAllGhosts();
+  }
+
+  for (const ped of pedestalMeshes) scene.remove(ped);
+  pedestalMeshes.length = 0;
+
+  gameStarted = false;
+  nameScreen.style.display = '';
+  hud.style.display = 'none';
+  leaderDisplay.style.display = 'none';
+  scoreboardEl.style.display = 'none';
+  debugEl.style.display = 'none';
+  debugVisible = false;
+  inactivityBanner.style.display = 'none';
+  inactivityWarningShown = false;
+  sprintMeter.wrap.style.display = 'none';
+  jumpMeter.wrap.style.display = 'none';
+
+  if (localPlayer) { scene.remove(localPlayer); localPlayer = null; }
+  localMesh = null;
+  localBody = null;
+  selfId = null;
+
+  for (const [id, group] of remotePlayers) scene.remove(group);
+  remotePlayers.clear();
+  remoteMeshes.clear();
+  remoteTargets.clear();
+  playerOutlines.clear();
+  playerCrowns.clear();
+  playerScoreSprites.clear();
+  playerNames.clear();
+
+  holderID = null;
+  allScores = {};
+  leaderID = null;
+
+  if (document.pointerLockElement) document.exitPointerLock();
+
+  socket.disconnect();
+  socket.connect();
+  lastActivityTime = Date.now();
+}
+
+function checkInactivity() {
+  if (!gameStarted) return;
+  const elapsed = Date.now() - lastActivityTime;
+  if (elapsed >= INACTIVITY_TIMEOUT) {
+    returnToMenu();
+    return;
+  }
+  if (elapsed >= INACTIVITY_TIMEOUT - INACTIVITY_WARNING && !inactivityWarningShown) {
+    inactivityWarningShown = true;
+    inactivityBanner.style.display = '';
+  }
+  if (inactivityWarningShown) {
+    const remaining = Math.ceil((INACTIVITY_TIMEOUT - elapsed) / 1000);
+    inactivityBanner.textContent = `AFK timeout in ${remaining}s — move to stay in game`;
+  }
+}
+
+window.addEventListener('keydown', () => resetActivity(), true);
+window.addEventListener('mousedown', () => resetActivity(), true);
+window.addEventListener('mousemove', () => resetActivity(), true);
+window.addEventListener('touchstart', () => resetActivity(), true);
+window.addEventListener('touchmove', () => resetActivity(), true);
+window.addEventListener('wheel', () => resetActivity(), true);
+
+// --- Godmode item menu ---
+let godmodeToolSelected = 'spawn';
+const pedestalMeshes = [];
+let pedestalTemplate = null;
+
+loader.load('/prefabs/item_ped.glb', (gltf) => {
+  pedestalTemplate = gltf.scene;
+  pedestalTemplate.traverse((child) => {
+    if (child.isMesh) {
+      child.castShadow = true;
+      child.receiveShadow = true;
+    }
+  });
+}, undefined, (err) => console.warn('Failed to load pedestal model:', err));
+
+const godmodeMenu = document.createElement('div');
+godmodeMenu.id = 'godmode-menu';
+godmodeMenu.style.cssText = 'position:absolute;top:50px;left:10px;background:rgba(0,0,0,0.8);border:1px solid rgba(255,255,255,0.3);border-radius:8px;padding:10px;font:12px "04b_03",Lato,sans-serif;color:white;z-index:30;display:none;user-select:none;';
+godmodeMenu.innerHTML = `
+  <div style="margin-bottom:8px;color:#aaa;letter-spacing:1px;font-size:10px;">PLACE ITEM</div>
+  <div id="gm-tool-spawn" class="gm-tool selected" data-tool="spawn" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬦ Spawn Point</div>
+  <div id="gm-tool-pedestal" class="gm-tool" data-tool="pedestal" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Item Pedestal</div>
+`;
+document.body.appendChild(godmodeMenu);
+
+const gmToolStyle = document.createElement('style');
+gmToolStyle.textContent = `
+  .gm-tool { transition: background 0.15s; }
+  .gm-tool:hover { background: rgba(255,255,255,0.15); }
+  .gm-tool.selected { background: rgba(68,136,255,0.4); border-left: 3px solid #4488ff; }
+`;
+document.head.appendChild(gmToolStyle);
+
+godmodeMenu.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const tool = e.target.closest('.gm-tool');
+  if (!tool) return;
+  godmodeToolSelected = tool.dataset.tool;
+  godmodeMenu.querySelectorAll('.gm-tool').forEach(t => t.classList.remove('selected'));
+  tool.classList.add('selected');
+});
+
+function showGodmodeMenu() { godmodeMenu.style.display = ''; }
+function hideGodmodeMenu() { godmodeMenu.style.display = 'none'; }
+
+function createPedestalAt(pt, pedId) {
+  if (!pedestalTemplate) return null;
+  const ped = pedestalTemplate.clone();
+  ped.position.set(pt.x, pt.y, pt.z);
+  ped.userData.pedestalId = pedId;
+  scene.add(ped);
+  pedestalMeshes.push(ped);
+  return ped;
+}
+
+function showPedestalMarkers() {
+  for (const ped of pedestalMeshes) {
+    ped.visible = true;
+  }
+}
+
+// --- Godmode hover preview ---
+const FLATNESS_THRESHOLD = 0.85;
+let ghostPreview = null;
+let ghostOutlineGroup = null;
+let ghostCanPlace = false;
+let hoveredExisting = null;
+const hoveredOriginalColors = new Map();
+
+const ghostSpawnGeo = new THREE.OctahedronGeometry(0.4, 0);
+const ghostBlueMat = new THREE.MeshStandardMaterial({ color: 0x4488ff, transparent: true, opacity: 0.45, depthWrite: false });
+const ghostRedMat = new THREE.MeshStandardMaterial({ color: 0xff3333, transparent: true, opacity: 0.45, depthWrite: false });
+const outlineBlueMat = new THREE.MeshBasicMaterial({ color: 0x4488ff, side: THREE.BackSide, transparent: true, opacity: 0.6 });
+const outlineRedMat = new THREE.MeshBasicMaterial({ color: 0xff3333, side: THREE.BackSide, transparent: true, opacity: 0.6 });
+const deleteRedMat = new THREE.MeshStandardMaterial({ color: 0xff2222, emissive: 0xff0000, emissiveIntensity: 0.3 });
+const deleteOutlineMat = new THREE.MeshBasicMaterial({ color: 0xff3333, side: THREE.BackSide });
+
+function createGhostSpawn() {
+  const group = new THREE.Group();
+  const diamond = new THREE.Mesh(ghostSpawnGeo, ghostBlueMat.clone());
+  diamond.scale.set(1, 1.5, 1);
+  group.add(diamond);
+  const outline = new THREE.Mesh(ghostSpawnGeo, outlineBlueMat.clone());
+  outline.scale.set(1.2, 1.8, 1.2);
+  group.add(outline);
+  group.visible = false;
+  scene.add(group);
+  return group;
+}
+
+function createGhostPedestal() {
+  if (!pedestalTemplate) return null;
+  const group = new THREE.Group();
+  const clone = pedestalTemplate.clone();
+  const meshes = [];
+  clone.traverse((child) => {
+    if (child.isMesh) meshes.push(child);
+  });
+  for (const mesh of meshes) {
+    mesh.material = ghostBlueMat.clone();
+    mesh.castShadow = false;
+    const olGeo = mesh.geometry.clone();
+    const ol = new THREE.Mesh(olGeo, outlineBlueMat.clone());
+    ol.scale.multiplyScalar(1.15);
+    ol.renderOrder = -1;
+    mesh.add(ol);
+  }
+  group.add(clone);
+  group.visible = false;
+  scene.add(group);
+  return group;
+}
+
+let ghostSpawn = null;
+let ghostPedestal = null;
+
+function getGhost() {
+  if (godmodeToolSelected === 'spawn') {
+    if (!ghostSpawn) ghostSpawn = createGhostSpawn();
+    if (ghostPedestal) ghostPedestal.visible = false;
+    return ghostSpawn;
+  } else {
+    if (!ghostPedestal) ghostPedestal = createGhostPedestal();
+    if (ghostSpawn) ghostSpawn.visible = false;
+    return ghostPedestal;
+  }
+}
+
+function setGhostColor(ghost, canPlace) {
+  if (!ghost) return;
+  const col = canPlace ? 0x4488ff : 0xff3333;
+  ghost.traverse((child) => {
+    if (child.isMesh && child.material && child.material.color) {
+      child.material.color.setHex(col);
+    }
+  });
+}
+
+function clearHoverHighlight() {
+  if (!hoveredExisting) return;
+  for (const [mesh, origColor] of hoveredOriginalColors) {
+    mesh.material = mesh.userData._origMaterial || mesh.material;
+    mesh.material.color.copy(origColor);
+    const ol = mesh.children.find(c => c.isMesh && c.material.side === THREE.BackSide);
+    if (ol && ol.userData._wasHidden !== undefined) {
+      ol.visible = ol.userData._wasHidden ? false : true;
+      if (ol.userData._origOlMat) ol.material = ol.userData._origOlMat;
+    }
+  }
+  hoveredOriginalColors.clear();
+  hoveredExisting = null;
+}
+
+function highlightForDelete(obj) {
+  clearHoverHighlight();
+  hoveredExisting = obj;
+  obj.traverse((child) => {
+    if (!child.isMesh || child.material.side === THREE.BackSide) return;
+    hoveredOriginalColors.set(child, child.material.color.clone());
+    child.userData._origMaterial = child.material;
+    child.material = child.material.clone();
+    child.material.color.set(0xff2222);
+    child.material.emissive = new THREE.Color(0xff0000);
+    child.material.emissiveIntensity = 0.3;
+    const ol = child.children.find(c => c.isMesh && c.material.side === THREE.BackSide);
+    if (ol) {
+      ol.userData._wasHidden = !ol.visible;
+      ol.userData._origOlMat = ol.material;
+      ol.visible = true;
+      ol.material = deleteOutlineMat.clone();
+    }
+  });
+}
+
+const hoverNDC = new THREE.Vector2();
+const hoverRaycaster = new THREE.Raycaster();
+hoverRaycaster.far = 500;
+
+function updateGodmodeHover(mouseX, mouseY) {
+  if (!godmode) return;
+
+  hoverNDC.x = (mouseX / window.innerWidth) * 2 - 1;
+  hoverNDC.y = -(mouseY / window.innerHeight) * 2 + 1;
+  hoverRaycaster.setFromCamera(hoverNDC, camera);
+
+  const ghost = getGhost();
+
+  // Check for existing items to highlight for deletion
+  if (godmodeToolSelected === 'spawn') {
+    const markerHits = hoverRaycaster.intersectObjects(spawnMarkers, false);
+    if (markerHits.length > 0) {
+      const hitMarker = markerHits[0].object;
+      if (hoveredExisting !== hitMarker) highlightForDelete(hitMarker);
+      if (ghost) ghost.visible = false;
+      return;
+    }
+  } else if (godmodeToolSelected === 'pedestal') {
+    const pedChildren = [];
+    for (const ped of pedestalMeshes) ped.traverse(c => { if (c.isMesh) pedChildren.push(c); });
+    const pedHits = hoverRaycaster.intersectObjects(pedChildren, false);
+    if (pedHits.length > 0) {
+      let hitObj = pedHits[0].object;
+      while (hitObj.parent && !hitObj.userData.pedestalId) hitObj = hitObj.parent;
+      if (hitObj.userData.pedestalId && hoveredExisting !== hitObj) highlightForDelete(hitObj);
+      if (ghost) ghost.visible = false;
+      return;
+    }
+  }
+
+  clearHoverHighlight();
+
+  // Raycast terrain for placement preview
+  const hits = hoverRaycaster.intersectObjects(levelMeshes, false);
+  if (hits.length === 0) {
+    if (ghost) ghost.visible = false;
+    return;
+  }
+
+  const hit = hits[0];
+  const normal = hit.face ? hit.face.normal.clone() : new THREE.Vector3(0, 1, 0);
+  const worldMatrix = new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld);
+  normal.applyMatrix3(worldMatrix).normalize();
+  const flatness = normal.dot(new THREE.Vector3(0, 1, 0));
+
+  if (godmodeToolSelected === 'spawn') {
+    ghostCanPlace = true;
+    if (ghost) {
+      ghost.position.set(hit.point.x, hit.point.y + 1.5, hit.point.z);
+      ghost.visible = true;
+      setGhostColor(ghost, true);
+    }
+  } else if (godmodeToolSelected === 'pedestal') {
+    ghostCanPlace = flatness >= FLATNESS_THRESHOLD;
+    if (ghost) {
+      ghost.position.set(hit.point.x, hit.point.y, hit.point.z);
+      ghost.visible = true;
+      setGhostColor(ghost, ghostCanPlace);
+    }
+  }
+}
+
+let lastHoverX = 0, lastHoverY = 0;
+renderer.domElement.addEventListener('mousemove', (e) => {
+  lastHoverX = e.clientX;
+  lastHoverY = e.clientY;
+  if (godmode) updateGodmodeHover(e.clientX, e.clientY);
+});
+
+function hideAllGhosts() {
+  if (ghostSpawn) ghostSpawn.visible = false;
+  if (ghostPedestal) ghostPedestal.visible = false;
+  clearHoverHighlight();
+}
+
 // --- Spawn editor state ---
 const spawnMarkers = [];
 let spawnClickCooldown = 0;
@@ -1296,31 +1643,57 @@ renderer.domElement.addEventListener('click', (e) => {
   spawnClickRaycaster.setFromCamera(spawnClickNDC, camera);
   spawnClickRaycaster.far = 500;
 
-  // Check if clicking on an existing spawn marker to remove it
-  const markerHits = spawnClickRaycaster.intersectObjects(spawnMarkers, false);
-  if (markerHits.length > 0) {
-    const hitMarker = markerHits[0].object;
-    const sp = hitMarker.userData.spawnPoint;
-    SPAWN_POINTS = SPAWN_POINTS.filter(p => p !== sp);
-    scene.remove(hitMarker);
-    const idx = spawnMarkers.indexOf(hitMarker);
-    if (idx !== -1) spawnMarkers.splice(idx, 1);
-    console.log(`REMOVED SPAWN POINT: { x: ${sp.x.toFixed(2)}, y: ${sp.y.toFixed(2)}, z: ${sp.z.toFixed(2)} } — ${SPAWN_POINTS.length} remaining`);
-    return;
+  if (godmodeToolSelected === 'spawn') {
+    // Check if clicking on an existing spawn marker to remove it
+    const markerHits = spawnClickRaycaster.intersectObjects(spawnMarkers, false);
+    if (markerHits.length > 0) {
+      const hitMarker = markerHits[0].object;
+      const sp = hitMarker.userData.spawnPoint;
+      SPAWN_POINTS = SPAWN_POINTS.filter(p => p !== sp);
+      scene.remove(hitMarker);
+      const idx = spawnMarkers.indexOf(hitMarker);
+      if (idx !== -1) spawnMarkers.splice(idx, 1);
+      console.log(`REMOVED SPAWN POINT: { x: ${sp.x.toFixed(2)}, y: ${sp.y.toFixed(2)}, z: ${sp.z.toFixed(2)} } — ${SPAWN_POINTS.length} remaining`);
+      return;
+    }
+
+    if (now - spawnClickCooldown < 0.5) return;
+    spawnClickCooldown = now;
+
+    const hits = spawnClickRaycaster.intersectObjects(levelMeshes, false);
+    if (hits.length === 0) return;
+    const pt = hits[0].point;
+    const newSp = { x: parseFloat(pt.x.toFixed(2)), y: parseFloat(pt.y.toFixed(2)), z: parseFloat(pt.z.toFixed(2)) };
+    SPAWN_POINTS.push(newSp);
+    createSpawnMarker(newSp);
+    console.log(`SPAWN POINT ADDED: { x: ${newSp.x}, y: ${newSp.y}, z: ${newSp.z} } — ${SPAWN_POINTS.length} total`);
+
+  } else if (godmodeToolSelected === 'pedestal') {
+    // Check if clicking on an existing pedestal to remove it
+    const pedChildren = [];
+    for (const ped of pedestalMeshes) ped.traverse(c => { if (c.isMesh) pedChildren.push(c); });
+    const pedHits = spawnClickRaycaster.intersectObjects(pedChildren, false);
+    if (pedHits.length > 0) {
+      let hitObj = pedHits[0].object;
+      while (hitObj.parent && !hitObj.userData.pedestalId) hitObj = hitObj.parent;
+      if (hitObj.userData.pedestalId) {
+        socket.emit('removePedestal', hitObj.userData.pedestalId);
+        return;
+      }
+    }
+
+    if (!ghostCanPlace) return;
+
+    if (now - spawnClickCooldown < 0.5) return;
+    spawnClickCooldown = now;
+
+    const hits = spawnClickRaycaster.intersectObjects(levelMeshes, false);
+    if (hits.length === 0) return;
+    const pt = hits[0].point;
+    const pos = { x: parseFloat(pt.x.toFixed(2)), y: parseFloat(pt.y.toFixed(2)), z: parseFloat(pt.z.toFixed(2)) };
+    socket.emit('placePedestal', pos);
+    console.log(`PEDESTAL PLACED: { x: ${pos.x}, y: ${pos.y}, z: ${pos.z} }`);
   }
-
-  // Cooldown for placement
-  if (now - spawnClickCooldown < 0.5) return;
-  spawnClickCooldown = now;
-
-  // Place new spawn point
-  const hits = spawnClickRaycaster.intersectObjects(levelMeshes, false);
-  if (hits.length === 0) return;
-  const pt = hits[0].point;
-  const newSp = { x: parseFloat(pt.x.toFixed(2)), y: parseFloat(pt.y.toFixed(2)), z: parseFloat(pt.z.toFixed(2)) };
-  SPAWN_POINTS.push(newSp);
-  createSpawnMarker(newSp);
-  console.log(`SPAWN POINT ADDED: { x: ${newSp.x}, y: ${newSp.y}, z: ${newSp.z} } — ${SPAWN_POINTS.length} total`);
 });
 
 renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -1629,11 +2002,36 @@ socket.on('levelChanged', (level) => {
   if (gameStarted) loadGameLevel(level);
 });
 
+socket.on('kicked', () => {
+  if (gameStarted) returnToMenu();
+});
+
+socket.on('currentPedestals', (peds) => {
+  for (const ped of peds) createPedestalAt(ped, ped.id);
+});
+
+socket.on('pedestalPlaced', (ped) => {
+  createPedestalAt(ped, ped.id);
+});
+
+socket.on('pedestalRemoved', (pedId) => {
+  const idx = pedestalMeshes.findIndex(p => p.userData.pedestalId === pedId);
+  if (idx !== -1) {
+    scene.remove(pedestalMeshes[idx]);
+    pedestalMeshes.splice(idx, 1);
+  }
+});
+
 function sendPosition() {
   if (!localBody) return;
-  const p = localBody.position;
-  const q = localBody.quaternion;
-  socket.emit('playerMoved', { x: p.x, y: p.y, z: p.z, qx: q.x, qy: q.y, qz: q.z, qw: q.w, smoothing: roundcubeSmoothing });
+  if (godmode) {
+    const c = camera.position;
+    socket.emit('playerMoved', { x: c.x, y: c.y, z: c.z, qx: 0, qy: 0, qz: 0, qw: 1, smoothing: roundcubeSmoothing, godmode: true });
+  } else {
+    const p = localBody.position;
+    const q = localBody.quaternion;
+    socket.emit('playerMoved', { x: p.x, y: p.y, z: p.z, qx: q.x, qy: q.y, qz: q.z, qw: q.w, smoothing: roundcubeSmoothing, godmode: false });
+  }
 }
 
 // --- Godmode / Noclip ---
@@ -1691,9 +2089,8 @@ window.addEventListener('keydown', (e) => {
       camera.rotation.set(pitch, yaw, 0);
       localBody.mass = 0;
       localBody.updateMassProperties();
-      // Show spawn markers
       showSpawnMarkers();
-      // Exit pointer lock so clicks work for spawn editing
+      showGodmodeMenu();
       if (document.pointerLockElement) document.exitPointerLock();
     } else if (!godmode && localBody) {
       const dir = new THREE.Vector3();
@@ -1715,8 +2112,9 @@ window.addEventListener('keydown', (e) => {
       const toPlayer = new THREE.Vector3().subVectors(localPlayer.position, camera.position);
       camYaw = Math.atan2(toPlayer.x, toPlayer.z);
       camPitch = 0.4;
-      // Hide spawn markers
       hideSpawnMarkers();
+      hideGodmodeMenu();
+      hideAllGhosts();
     }
   }
   if (e.code === 'BracketRight') { BASE_CHAIN_LENGTH = Math.min(20, BASE_CHAIN_LENGTH + 0.5); }
@@ -1796,8 +2194,9 @@ function updateDebug(delta) {
       `CamPos: (${c.x.toFixed(2)}, ${c.y.toFixed(2)}, ${c.z.toFixed(2)})\n` +
       `CamRot: (${r.x.toFixed(2)}, ${r.y.toFixed(2)}, ${r.z.toFixed(2)})\n` +
       `WASD: fly  E/Q/Shift: up/down\n` +
-      `Click: place spawn  Click marker: remove\n` +
-      `Spawns: ${SPAWN_POINTS.length}\n` +
+      `Tool:  ${godmodeToolSelected}\n` +
+      `Click: place/remove ${godmodeToolSelected}\n` +
+      `Spawns: ${SPAWN_POINTS.length}  Pedestals: ${pedestalMeshes.length}\n` +
       `Chain:  ${chainLength.toFixed(1)} [ / ] to adjust`;
     return;
   }
@@ -1885,6 +2284,26 @@ function animate() {
             oldOutGeo.dispose();
           }
         }
+
+        const isGhost = !!target.godmode;
+        const currentlyGhost = !!mesh.userData.isGhost;
+        if (isGhost !== currentlyGhost) {
+          mesh.userData.isGhost = isGhost;
+          mesh.material.transparent = true;
+          mesh.material.opacity = isGhost ? 0.3 : 1.0;
+          mesh.castShadow = !isGhost;
+          const outline = mesh.children.find(c => c.isMesh);
+          if (outline) {
+            outline.material.transparent = true;
+            outline.material.opacity = isGhost ? 0.15 : 1.0;
+          }
+          for (const child of group.children) {
+            if (child.isSprite) {
+              child.material.opacity = isGhost ? 0.3 : 1.0;
+              child.material.transparent = true;
+            }
+          }
+        }
       }
     }
 
@@ -1908,6 +2327,8 @@ function animate() {
     } else {
       scoreboardEl.style.display = 'none';
     }
+
+    checkInactivity();
   }
 
   renderer.render(scene, camera);
