@@ -76,7 +76,7 @@ const pedestals = [];
 const ITEMS_BY_CATEGORY = {
   green: ['grapple', 'launch_pad', 'boost_pad', 'teleporter'],
   red: ['machinegun', 'rocket', 'mines'],
-  yellow: ['wall', 'ramp', 'platform']
+  yellow: ['block', 'wall', 'ramp', 'platform', 'bridge_gun']
 };
 
 setInterval(() => {
@@ -105,6 +105,7 @@ const activeTeleporters = [];
 const activeMines = [];
 const activeCoins = [];
 const activePads = [];
+const activeBuilds = [];
 
 function pickRandomHolder() {
   const ids = Object.keys(players);
@@ -188,6 +189,7 @@ io.on('connection', (socket) => {
     socket.emit('currentTeleporters', activeTeleporters);
     socket.emit('currentMines', activeMines);
     socket.emit('currentPads', activePads);
+    socket.emit('currentBuilds', activeBuilds);
     socket.broadcast.emit('newPlayer', { id: socket.id, ...players[socket.id] });
 
     // First player becomes holder
@@ -236,6 +238,10 @@ io.on('connection', (socket) => {
     io.emit('tagCooldown', TAG_COOLDOWN_MS);
   });
 
+  socket.on('godmodeGive', (item) => {
+    socket.emit('itemPickedUp', item);
+  });
+
   socket.on('placePedestal', (pos) => {
     const id = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
     const ped = { ...pos, id, currentItem: null, spawnTime: 0 };
@@ -246,6 +252,20 @@ io.on('connection', (socket) => {
   socket.on('placeTeleporter', (t) => {
     activeTeleporters.push(t);
     io.emit('teleporterPlaced', t);
+  });
+
+  socket.on('placeBuild', (b) => {
+    const build = { ...b, id: Date.now().toString(36) + Math.random().toString(36).substr(2) };
+    activeBuilds.push(build);
+    io.emit('buildPlaced', build);
+  });
+
+  socket.on('removeBuild', (id) => {
+    const idx = activeBuilds.findIndex(b => b.id === id);
+    if (idx !== -1) {
+      activeBuilds.splice(idx, 1);
+      io.emit('buildRemoved', id);
+    }
   });
 
   socket.on('placePad', (pad) => {

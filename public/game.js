@@ -59,6 +59,7 @@ scene.background = new THREE.Color(0x000000);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.domElement.style.cssText = 'position:fixed;top:0;left:0;z-index:1;';
 document.body.appendChild(renderer.domElement);
 
@@ -115,12 +116,13 @@ sunLight.castShadow = true;
 sunLight.shadow.mapSize.width = 2048;
 sunLight.shadow.mapSize.height = 2048;
 sunLight.shadow.camera.near = 10;
-sunLight.shadow.camera.far = 500;
-sunLight.shadow.camera.left = -100;
-sunLight.shadow.camera.right = 100;
-sunLight.shadow.camera.top = 100;
-sunLight.shadow.camera.bottom = -100;
+sunLight.shadow.camera.far = 400;
+sunLight.shadow.camera.left = -60;
+sunLight.shadow.camera.right = 60;
+sunLight.shadow.camera.top = 60;
+sunLight.shadow.camera.bottom = -60;
 scene.add(sunLight);
+scene.add(sunLight.target);
 
 const hemiLight = new THREE.HemisphereLight(0x87ceeb, 0x553322, 0.6);
 scene.add(hemiLight);
@@ -309,6 +311,7 @@ const worldMines = [];
 const activeCoinsList = [];
 const worldPads = [];
 const pendingImpulses = [];
+const worldBuilds = [];
 
 // --- GPU Particle System (Points-based) ---
 const MAX_PARTICLES = 2000;
@@ -460,7 +463,7 @@ document.body.appendChild(inventoryHud);
 function getColorForItem(item) {
   if (['grapple', 'launch_pad', 'boost_pad', 'teleporter'].includes(item)) return '#44ff44';
   if (['machinegun', 'rocket', 'mines'].includes(item)) return '#ff4444';
-  if (['wall', 'ramp', 'platform'].includes(item)) return '#ffff44';
+  if (['block', 'wall', 'ramp', 'platform', 'bridge_gun'].includes(item)) return '#ffff44';
   return '#ffffff';
 }
 
@@ -565,6 +568,29 @@ function consumeItem(targetPt) {
       if (pendingTeleporterMesh) { scene.remove(pendingTeleporterMesh); pendingTeleporterMesh = null; }
       pendingTeleporter = null;
     }
+  } else if (['block', 'wall', 'ramp', 'platform'].includes(item)) {
+    if (!buildTarget || !buildCanPlace) return;
+    socket.emit('placeBuild', { type: item, ...buildTarget });
+    inventory[0].ammo--;
+    updateInventoryUI();
+    if (inventory[0].ammo <= 0) shiftInventory(item, null);
+    return;
+  } else if (item === 'bridge_gun') {
+    if (!targetPt || !localBody) return;
+    const origin = new THREE.Vector3().copy(localBody.position).add(new THREE.Vector3(0, -0.4, 0));
+    const target = targetPt.clone();
+    let dist = origin.distanceTo(target);
+    if (dist > 100) {
+      dist = 100;
+      target.copy(origin).add(new THREE.Vector3().subVectors(target, origin).normalize().multiplyScalar(100));
+    }
+    const mid = origin.clone().lerp(target, 0.5);
+    const dir = new THREE.Vector3().subVectors(target, origin).normalize();
+    socket.emit('placeBuild', { type: 'bridge', x: mid.x, y: mid.y, z: mid.z, ry: Math.atan2(dir.x, dir.z), rx: -Math.asin(dir.y), length: dist });
+    inventory[0].ammo--;
+    updateInventoryUI();
+    if (inventory[0].ammo <= 0) shiftInventory(item, targetPt);
+    return;
   } else if (item === 'rocket') {
     if (!localBody || rocketCooldownTimer > 0) return;
     const fireDir = getAimDirection();
@@ -807,6 +833,14 @@ function returnToMenu() {
   for (const p of worldPads) scene.remove(p.mesh);
   worldPads.length = 0;
 
+  for (const b of worldBuilds) {
+    scene.remove(b.mesh);
+    world.removeBody(b.body);
+    const lIdx = levelMeshes.indexOf(b.mesh);
+    if (lIdx !== -1) levelMeshes.splice(lIdx, 1);
+  }
+  worldBuilds.length = 0;
+
   if (machinegunInterval) { clearInterval(machinegunInterval); machinegunInterval = null; }
 
   updateInventoryUI();
@@ -866,6 +900,33 @@ godmodeMenu.innerHTML = `
   <div id="gm-tool-ped-green" class="gm-tool" data-tool="pedestal_green" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Prefab: Movement Item</div>
   <div id="gm-tool-ped-red" class="gm-tool" data-tool="pedestal_red" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Prefab: Weapon Item</div>
   <div id="gm-tool-ped-yellow" class="gm-tool" data-tool="pedestal_yellow" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Prefab: Build Item</div>
+  <div style="margin-bottom:8px;color:#aaa;letter-spacing:1px;font-size:10px;margin-top:10px;">TOOLS</div>
+  <div id="gm-tool-build-block" class="gm-tool" data-tool="build_mode" data-build="block" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Tool: Build Block</div>
+  <div id="gm-tool-build-wall" class="gm-tool" data-tool="build_mode" data-build="wall" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Tool: Build Wall</div>
+  <div id="gm-tool-build-ramp" class="gm-tool" data-tool="build_mode" data-build="ramp" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Tool: Build Ramp</div>
+  <div id="gm-tool-build-platform" class="gm-tool" data-tool="build_mode" data-build="platform" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Tool: Build Platform</div>
+  <div id="gm-tool-delete" class="gm-tool" data-tool="delete_block" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Tool: Delete Block</div>
+  <div style="margin-bottom:8px;color:#aaa;letter-spacing:1px;font-size:10px;margin-top:10px;">MOVEMENT ITEMS</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
+    <div class="gm-give" data-item="grapple" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Grapple</div>
+    <div class="gm-give" data-item="launch_pad" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Launch Pad</div>
+    <div class="gm-give" data-item="boost_pad" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Boost Pad</div>
+    <div class="gm-give" data-item="teleporter" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Teleporter</div>
+  </div>
+  <div style="margin-bottom:8px;color:#aaa;letter-spacing:1px;font-size:10px;margin-top:10px;">WEAPON ITEMS</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
+    <div class="gm-give" data-item="machinegun" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Machinegun</div>
+    <div class="gm-give" data-item="rocket" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Rocket</div>
+    <div class="gm-give" data-item="mines" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Mines</div>
+  </div>
+  <div style="margin-bottom:8px;color:#aaa;letter-spacing:1px;font-size:10px;margin-top:10px;">BUILD ITEMS</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
+    <div class="gm-give" data-item="block" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Block</div>
+    <div class="gm-give" data-item="wall" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Wall</div>
+    <div class="gm-give" data-item="ramp" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Ramp</div>
+    <div class="gm-give" data-item="platform" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Platform</div>
+    <div class="gm-give" data-item="bridge_gun" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Bridge Gun</div>
+  </div>
 `;
 document.body.appendChild(godmodeMenu);
 
@@ -886,9 +947,15 @@ document.body.appendChild(menuOverlay);
 
 godmodeMenu.addEventListener('click', (e) => {
   e.stopPropagation();
+  const give = e.target.closest('.gm-give');
+  if (give) {
+     socket.emit('godmodeGive', give.dataset.item);
+     return;
+  }
   const tool = e.target.closest('.gm-tool');
   if (!tool) return;
   godmodeToolSelected = tool.dataset.tool;
+  if (tool.dataset.build) godmodeBuildType = tool.dataset.build;
   godmodeMenu.querySelectorAll('.gm-tool').forEach(t => t.classList.remove('selected'));
   tool.classList.add('selected');
 });
@@ -936,7 +1003,7 @@ let hoveredExisting = null;
 const hoveredOriginalColors = new Map();
 
 const ghostSpawnGeo = new THREE.OctahedronGeometry(0.4, 0);
-const ghostBlueMat = new THREE.MeshStandardMaterial({ color: 0x4488ff, transparent: true, opacity: 0.45, depthWrite: false });
+const ghostBlueMat = new THREE.MeshStandardMaterial({ color: 0x4488ff, transparent: true, opacity: 0.45, depthWrite: false, side: THREE.DoubleSide });
 const ghostRedMat = new THREE.MeshStandardMaterial({ color: 0xff3333, transparent: true, opacity: 0.45, depthWrite: false });
 const outlineBlueMat = new THREE.MeshBasicMaterial({ color: 0x4488ff, side: THREE.BackSide, transparent: true, opacity: 0.6 });
 const outlineRedMat = new THREE.MeshBasicMaterial({ color: 0xff3333, side: THREE.BackSide, transparent: true, opacity: 0.6 });
@@ -1079,6 +1146,15 @@ function updateGodmodeHover(mouseX, mouseY) {
       if (ghost) ghost.visible = false;
       return;
     }
+  } else if (godmodeToolSelected === 'delete_block') {
+    const buildMeshes = worldBuilds.map(b => b.mesh);
+    const buildHits = hoverRaycaster.intersectObjects(buildMeshes, false);
+    if (buildHits.length > 0) {
+      const hitObj = buildHits[0].object;
+      if (hoveredExisting !== hitObj) highlightForDelete(hitObj);
+      if (ghost) ghost.visible = false;
+      return;
+    }
   }
 
   clearHoverHighlight();
@@ -1115,6 +1191,63 @@ function updateGodmodeHover(mouseX, mouseY) {
   }
 }
 
+function createRightWedgeGeometry(w, h, d) {
+  const geo = new THREE.BoxGeometry(w, h, d);
+  const pos = geo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    if (pos.getY(i) > 0 && pos.getZ(i) > 0) {
+      pos.setY(i, -h / 2);
+    }
+  }
+  geo.computeVertexNormals();
+  return geo;
+}
+
+// --- Block Placement Grid & Ghost ---
+let buildTarget = null;
+let buildCanPlace = false;
+let godmodeBuildType = 'wall';
+let buildRotationSteps = 0;
+let buildPlacementDistance = 16;
+let buildPlaneY = 0;
+
+const buildGhostMat = new THREE.MeshStandardMaterial({ color: 0x4488ff, transparent: true, opacity: 0.45, depthWrite: false, side: THREE.DoubleSide });
+const buildGhost = new THREE.Group();
+const bgBlock = new THREE.Mesh(new THREE.BoxGeometry(4, 4, 4), buildGhostMat);
+const bgWall = new THREE.Mesh(new THREE.BoxGeometry(4, 4, 1), buildGhostMat);
+const bgRamp = new THREE.Mesh(createRightWedgeGeometry(4, 4, 4), buildGhostMat);
+const bgPlatform = new THREE.Mesh(new THREE.BoxGeometry(4, 1, 4), buildGhostMat);
+buildGhost.add(bgBlock, bgWall, bgRamp, bgPlatform);
+buildGhost.visible = false;
+scene.add(buildGhost);
+
+const bridgeGhostMat = new THREE.MeshBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0.4, depthWrite: false });
+const bridgeGhost = new THREE.Mesh(new THREE.BoxGeometry(4, 0.2, 1), bridgeGhostMat);
+bridgeGhost.visible = false;
+scene.add(bridgeGhost);
+
+const gridPointsGeo = new THREE.BufferGeometry();
+const gridPts = [];
+const GRID_RAD = 4;
+for (let x = -GRID_RAD; x <= GRID_RAD; x++) {
+  for (let y = -GRID_RAD; y <= GRID_RAD; y++) {
+    for (let z = -GRID_RAD; z <= GRID_RAD; z++) {
+      gridPts.push(x * 4, y * 4, z * 4);
+    }
+  }
+}
+gridPointsGeo.setAttribute('position', new THREE.Float32BufferAttribute(gridPts, 3));
+const gridPointsMat = new THREE.PointsMaterial({ color: 0x4488ff, size: 0.15, transparent: true, opacity: 0.5 });
+const buildGrid = new THREE.Points(gridPointsGeo, gridPointsMat);
+buildGrid.visible = false;
+scene.add(buildGrid);
+
+const groundGrid = new THREE.GridHelper(GRID_RAD * 8, GRID_RAD * 2, 0x4488ff, 0x4488ff);
+groundGrid.material.transparent = true;
+groundGrid.material.opacity = 0;
+groundGrid.visible = false;
+scene.add(groundGrid);
+
 const playerGhostGeo = new THREE.CylinderGeometry(0.5, 0.5, 0.2, 16);
 const playerGhostMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.5 });
 const playerGhost = new THREE.Mesh(playerGhostGeo, playerGhostMat);
@@ -1136,6 +1269,10 @@ function hideAllGhosts() {
   if (ghostSpawn) ghostSpawn.visible = false;
   if (ghostPedestal) ghostPedestal.visible = false;
   clearHoverHighlight();
+  if (buildGhost) buildGhost.visible = false;
+  if (buildGrid) buildGrid.visible = false;
+  if (groundGrid) groundGrid.visible = false;
+  if (bridgeGhost) bridgeGhost.visible = false;
 }
 
 // --- Spawn editor state ---
@@ -1653,7 +1790,7 @@ if (isMobile) {
       camTouchId = null;
       const dist = Math.hypot(t.clientX - camTouchStartX, t.clientY - camTouchStartY);
       if (dist < 10 && performance.now() - camTouchStartTime < 300) {
-        if (!godmode && inventory.length > 0 && inventory[0].type !== 'machinegun') {
+        if (!godmode && inventory.length > 0 && !['machinegun', 'block', 'wall', 'ramp', 'platform'].includes(inventory[0].type)) {
           const ndc = new THREE.Vector2((t.clientX / window.innerWidth) * 2 - 1, -(t.clientY / window.innerHeight) * 2 + 1);
           const item = inventory[0].type;
           const isWeapon = ['rocket', 'machinegun', 'grapple'].includes(item);
@@ -2075,8 +2212,8 @@ let chainLength = BASE_CHAIN_LENGTH;
 let camHeight = 5.8;
 let camYaw = Math.PI;
 let camPitch = 0.4;
-const CAM_PITCH_MIN = -0.3;
-const CAM_PITCH_MAX = 1.2;
+const CAM_PITCH_MIN = -1.4;
+const CAM_PITCH_MAX = 1.4;
 const MOUSE_SENSITIVITY = 0.003;
 const CAM_DRAG_SPEED = 1.8;
 let lastMouseMoveTime = 0;
@@ -2088,15 +2225,43 @@ let pointerLockSupported = false;
 
 renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
 
+let isDraggingBuild = false;
+let dragBuildLock = null;
+let lastBuiltCell = null;
+
 renderer.domElement.addEventListener('mousedown', (e) => {
   if (e.button === 2) mouseDragging = true;
-  if (e.button === 0 && !godmode && inventory.length > 0 && inventory[0].type === 'machinegun') {
-    startMachinegun();
+  if (e.button === 0) {
+    const item = inventory.length > 0 ? inventory[0].type : null;
+    if (!godmode && item === 'machinegun') {
+      startMachinegun();
+    } else if ((!godmode && ['block', 'wall', 'ramp', 'platform'].includes(item)) || (godmode && godmodeToolSelected === 'build_mode')) {
+      if (buildCanPlace && buildTarget) {
+        isDraggingBuild = true;
+        const type = godmode ? godmodeBuildType : item;
+        if (type === 'wall') {
+          dragBuildLock = (buildRotationSteps % 2 === 0) ? { axis: 'z', value: buildTarget.z } : { axis: 'x', value: buildTarget.x };
+        } else {
+          dragBuildLock = { axis: 'y', value: buildTarget.y };
+        }
+        lastBuiltCell = `${buildTarget.x},${buildTarget.y},${buildTarget.z}`;
+        socket.emit('placeBuild', { type, ...buildTarget });
+        if (!godmode) {
+          inventory[0].ammo--;
+          updateInventoryUI();
+          if (inventory[0].ammo <= 0) { shiftInventory(type, null); isDraggingBuild = false; }
+        }
+      }
+    }
   }
 });
 window.addEventListener('mouseup', (e) => {
   if (e.button === 2) mouseDragging = false;
-  if (e.button === 0) stopMachinegun();
+  if (e.button === 0) {
+    stopMachinegun();
+    isDraggingBuild = false;
+    dragBuildLock = null;
+  }
 });
 
 document.addEventListener('mousemove', (e) => {
@@ -2118,10 +2283,14 @@ document.addEventListener('mousemove', (e) => {
 
 window.addEventListener('wheel', (e) => {
   if (!gameStarted) return;
-  if (godmode) {
-    ghostRotationY += (e.deltaY > 0 ? 1 : -1) * (Math.PI / 8);
-    const ghost = getGhost();
-    if (ghost) ghost.rotation.y = ghostRotationY;
+  const isBuilding = (!godmode && inventory.length > 0 && ['block', 'wall', 'ramp', 'platform'].includes(inventory[0].type)) || (godmode && godmodeToolSelected === 'build_mode');
+  if (isBuilding) {
+    if (godmode) {
+      buildPlaneY -= (e.deltaY > 0 ? 4 : -4);
+    } else {
+      buildPlacementDistance -= (e.deltaY > 0 ? 1 : -1) * 2;
+      buildPlacementDistance = Math.max(4, Math.min(100, buildPlacementDistance));
+    }
   } else {
     BASE_CHAIN_LENGTH += e.deltaY * 0.005;
     BASE_CHAIN_LENGTH = Math.max(2, Math.min(20, BASE_CHAIN_LENGTH));
@@ -2159,7 +2328,7 @@ function hideSpawnMarkers() {
 
 renderer.domElement.addEventListener('click', (e) => {
   if (!godmode) {
-    if (inventory.length > 0 && inventory[0].type !== 'machinegun') {
+    if (inventory.length > 0 && !['machinegun', 'block', 'wall', 'ramp', 'platform'].includes(inventory[0].type)) {
       const ndc = new THREE.Vector2((e.clientX / window.innerWidth) * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1);
       const item = inventory[0].type;
       const isWeapon = ['rocket', 'machinegun', 'grapple'].includes(item);
@@ -2226,6 +2395,13 @@ renderer.domElement.addEventListener('click', (e) => {
     const pos = { x: parseFloat(pt.x.toFixed(2)), y: parseFloat(pt.y.toFixed(2)), z: parseFloat(pt.z.toFixed(2)), ry: parseFloat(ghostRotationY.toFixed(2)), type };
     socket.emit('placePedestal', pos);
     console.log(`PEDESTAL PLACED: { x: ${pos.x}, y: ${pos.y}, z: ${pos.z} }`);
+  } else if (godmodeToolSelected === 'delete_block') {
+    const buildMeshes = worldBuilds.map(b => b.mesh);
+    const buildHits = spawnClickRaycaster.intersectObjects(buildMeshes, false);
+    if (buildHits.length > 0) {
+       const id = worldBuilds.find(b => b.mesh === buildHits[0].object)?.id;
+       if (id) socket.emit('removeBuild', id);
+    }
   }
 });
 
@@ -2591,7 +2767,8 @@ socket.on('pedestalsUpdated', (peds) => {
 
 socket.on('itemPickedUp', (item) => {
   if (inventory.length < MAX_INVENTORY) {
-    inventory.push({ type: item, ammo: item === 'machinegun' ? 100 : (item === 'rocket' ? 3 : 0) });
+    const ammoMap = { machinegun: 100, rocket: 3, bridge_gun: 3, wall: 3, ramp: 3, platform: 3 };
+    inventory.push({ type: item, ammo: ammoMap[item] || 0 });
     console.log(`Picked up ${item}! Inventory:`, inventory);
     updateInventoryUI();
   }
@@ -2638,6 +2815,63 @@ function addPadToWorld(p) {
 }
 socket.on('currentPads', (ps) => { for (const p of worldPads) scene.remove(p.mesh); worldPads.length = 0; for (const p of ps) addPadToWorld(p); });
 socket.on('padPlaced', (p) => addPadToWorld(p));
+
+function addBuildToWorld(b) {
+  const isHolo = b.type === 'bridge';
+  const mat = new THREE.MeshStandardMaterial({ color: isHolo ? 0x00ffff : 0xaaaaaa, transparent: isHolo, opacity: isHolo ? 0.6 : 1.0, roughness: 0.8, side: THREE.DoubleSide });
+  let w = 4, h = 4, d = 4;
+  let geo, shape;
+  if (b.type === 'block') { w = 4; h = 4; d = 4; geo = new THREE.BoxGeometry(w, h, d); shape = new CANNON.Box(new CANNON.Vec3(w/2, h/2, d/2)); }
+  else if (b.type === 'wall') { w = 4; h = 4; d = 1; geo = new THREE.BoxGeometry(w, h, d); shape = new CANNON.Box(new CANNON.Vec3(w/2, h/2, d/2)); }
+  else if (b.type === 'platform') { w = 4; h = 1; d = 4; geo = new THREE.BoxGeometry(w, h, d); shape = new CANNON.Box(new CANNON.Vec3(w/2, h/2, d/2)); }
+  else if (b.type === 'bridge') { w = 4; h = 0.2; d = b.length; geo = new THREE.BoxGeometry(w, h, d); shape = new CANNON.Box(new CANNON.Vec3(w/2, h/2, d/2)); }
+  else if (b.type === 'ramp') {
+    geo = createRightWedgeGeometry(w, h, d);
+    const vertices = [
+      new CANNON.Vec3(-w/2, -h/2,  d/2), new CANNON.Vec3( w/2, -h/2,  d/2),
+      new CANNON.Vec3( w/2, -h/2, -d/2), new CANNON.Vec3(-w/2, -h/2, -d/2),
+      new CANNON.Vec3(-w/2,  h/2, -d/2), new CANNON.Vec3( w/2,  h/2, -d/2)
+    ];
+    const faces = [
+      [0, 3, 2, 1], // Bottom
+      [3, 4, 5, 2], // Back
+      [0, 4, 3],    // Left
+      [1, 2, 5],    // Right
+      [0, 1, 5, 4]  // Slope
+    ];
+    shape = new CANNON.ConvexPolyhedron(vertices, faces);
+  } else {
+    geo = new THREE.BoxGeometry(w, h, d); shape = new CANNON.Box(new CANNON.Vec3(w/2, h/2, d/2));
+  }
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(b.x, b.y, b.z);
+  mesh.rotation.order = 'YXZ';
+  if (b.ry) mesh.rotation.y = b.ry;
+  if (b.rx) mesh.rotation.x = b.rx;
+  mesh.castShadow = !isHolo; mesh.receiveShadow = !isHolo;
+  scene.add(mesh);
+  addLevelCollider(mesh);
+  const body = new CANNON.Body({ mass: 0, shape, material: groundMaterial });
+  body.position.set(b.x, b.y, b.z);
+  if (b.ry || b.rx) {
+     const qx = new CANNON.Quaternion(); if (b.rx) qx.setFromAxisAngle(new CANNON.Vec3(1,0,0), b.rx);
+     const qy = new CANNON.Quaternion(); if (b.ry) qy.setFromAxisAngle(new CANNON.Vec3(0,1,0), b.ry);
+     body.quaternion = qy.mult(qx);
+  }
+  world.addBody(body);
+  worldBuilds.push({ id: b.id, mesh, body });
+}
+socket.on('currentBuilds', (bs) => { for (const b of bs) addBuildToWorld(b); });
+socket.on('buildPlaced', (b) => addBuildToWorld(b));
+socket.on('buildRemoved', (id) => {
+  const idx = worldBuilds.findIndex(b => b.id === id);
+  if (idx !== -1) {
+    const b = worldBuilds[idx];
+    scene.remove(b.mesh); world.removeBody(b.body);
+    const lIdx = levelMeshes.indexOf(b.mesh); if (lIdx !== -1) levelMeshes.splice(lIdx, 1);
+    worldBuilds.splice(idx, 1);
+  }
+});
 
 socket.on('machinegunFired', (data) => {
   const geo = new THREE.CylinderGeometry(0.05, 0.05, 2.0, 4);
@@ -2978,6 +3212,7 @@ window.addEventListener('keydown', (e) => {
     debugEl.style.display = debugVisible ? '' : 'none';
     gimbal.visible = debugVisible;
     debugFrontGroup.visible = debugVisible;
+    if (!debugVisible) clearHoverHighlight();
   }
   if (e.code === 'F4' && gameStarted) {
     e.preventDefault();
@@ -2991,6 +3226,7 @@ window.addEventListener('keydown', (e) => {
       camera.rotation.set(pitch, yaw, 0);
       localBody.mass = 0;
       localBody.updateMassProperties();
+      buildPlaneY = Math.round(camera.position.y / 4) * 4 - 4;
       showSpawnMarkers();
       showGodmodeMenu();
       if (document.pointerLockElement) document.exitPointerLock();
@@ -3022,6 +3258,16 @@ window.addEventListener('keydown', (e) => {
   }
   if (e.code === 'BracketRight') { BASE_CHAIN_LENGTH = Math.min(20, BASE_CHAIN_LENGTH + 0.5); }
   if (e.code === 'BracketLeft') { BASE_CHAIN_LENGTH = Math.max(2, BASE_CHAIN_LENGTH - 0.5); }
+  if (e.code === 'KeyR' && gameStarted) {
+    const isBuilding = (!godmode && inventory.length > 0 && ['block', 'wall', 'ramp', 'platform'].includes(inventory[0].type)) || (godmode && godmodeToolSelected === 'build_mode');
+    if (isBuilding) {
+      buildRotationSteps = (buildRotationSteps + 1) % 4;
+    } else if (godmode && (godmodeToolSelected === 'spawn' || godmodeToolSelected.startsWith('pedestal'))) {
+      ghostRotationY += Math.PI / 8;
+      const ghost = getGhost();
+      if (ghost) ghost.rotation.y = ghostRotationY;
+    }
+  }
   if (e.code === 'Comma' && playerShape === 'roundcube' && localMesh) {
     roundcubeSmoothing = Math.max(0, roundcubeSmoothing - 0.05);
     originalSmoothing = roundcubeSmoothing;
@@ -3230,6 +3476,8 @@ function animate() {
   const rawDelta = clock.getDelta();
   const delta = Math.min(rawDelta, 0.05);
 
+  const isBuilding = (!godmode && inventory.length > 0 && ['block', 'wall', 'ramp', 'platform'].includes(inventory[0].type)) || (godmode && godmodeToolSelected === 'build_mode');
+
   if (!gameStarted && currentLevelObj) {
     if (SPAWN_POINTS && SPAWN_POINTS.length > 0) {
       const t = performance.now() / 1000;
@@ -3280,9 +3528,13 @@ function animate() {
     }
 
     // Player item ghosting
-    if (!godmode && inventory.length > 0 && localPlayer) {
-      const item = inventory[0].type;
+    if (localPlayer) {
+      const item = isBuilding ? (godmode ? godmodeBuildType : inventory[0].type) : (inventory.length > 0 ? inventory[0].type : null);
       if (['mines', 'launch_pad', 'boost_pad'].includes(item)) {
+        buildGrid.visible = false;
+        groundGrid.visible = false;
+        buildGhost.visible = false;
+        if (bridgeGhost) bridgeGhost.visible = false;
         hoverRaycaster.setFromCamera(lastMouseNDC, camera);
         const hits = hoverRaycaster.intersectObjects(levelMeshes, false);
         if (hits.length > 0) {
@@ -3292,8 +3544,142 @@ function animate() {
           playerGhost.visible = true;
           playerGhost.material.color.setHex(dist <= 10 ? 0x4488ff : 0xff3333);
         } else playerGhost.visible = false;
-      } else playerGhost.visible = false;
-    } else if (playerGhost && playerGhost.visible) playerGhost.visible = false;
+      } else if (['block', 'wall', 'ramp', 'platform'].includes(item)) {
+        playerGhost.visible = false;
+        buildGrid.visible = true;
+        groundGrid.visible = true;
+        if (bridgeGhost) bridgeGhost.visible = false;
+
+        const px = Math.round((godmode ? camera.position.x : localPlayer.position.x) / 4) * 4;
+        const py = godmode ? buildPlaneY : Math.round(localPlayer.position.y / 4) * 4;
+        const pz = Math.round((godmode ? camera.position.z : localPlayer.position.z) / 4) * 4;
+        buildGrid.position.set(px, py, pz);
+        groundGrid.position.set(px, py, pz);
+
+        const distToGrid = camera.position.distanceTo(groundGrid.position);
+        const opacity = 1.0 - THREE.MathUtils.smoothstep(20, 60, distToGrid);
+        groundGrid.material.opacity = opacity * 0.3;
+        buildGrid.material.opacity = opacity * 0.5;
+
+        hoverRaycaster.setFromCamera(lastMouseNDC, camera);
+        const hits = hoverRaycaster.intersectObjects([...levelMeshes, ...worldBuilds.map(b => b.mesh)], false);
+
+        let targetPt;
+        if (godmode) {
+          const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -py);
+          targetPt = new THREE.Vector3();
+          if (!hoverRaycaster.ray.intersectPlane(plane, targetPt)) {
+            targetPt = hoverRaycaster.ray.origin.clone().add(hoverRaycaster.ray.direction.multiplyScalar(buildPlacementDistance));
+          }
+        } else {
+          if (hits.length > 0 && hits[0].distance <= buildPlacementDistance) {
+            const pt = hits[0].point;
+            const norm = hits[0].face ? hits[0].face.normal.clone() : new THREE.Vector3(0,1,0);
+            const worldMatrix = new THREE.Matrix3().getNormalMatrix(hits[0].object.matrixWorld);
+            norm.applyMatrix3(worldMatrix).normalize();
+            targetPt = new THREE.Vector3(pt.x + norm.x * 0.1, pt.y + norm.y * 0.1, pt.z + norm.z * 0.1);
+          } else {
+            targetPt = hoverRaycaster.ray.origin.clone().add(hoverRaycaster.ray.direction.multiplyScalar(buildPlacementDistance));
+          }
+        }
+
+        buildGhost.visible = true;
+        bgBlock.visible = item === 'block';
+        bgWall.visible = item === 'wall';
+        bgRamp.visible = item === 'ramp';
+        bgPlatform.visible = item === 'platform';
+
+        const cx = Math.floor(targetPt.x / 4) * 4 + 2;
+        const cy = Math.floor(targetPt.y / 4) * 4 + 2;
+        const cz = Math.floor(targetPt.z / 4) * 4 + 2;
+
+          let finalX = cx, finalY = cy, finalZ = cz;
+          let rotY = buildRotationSteps * (Math.PI / 2);
+          let rotX = 0;
+
+          if (item === 'wall') {
+            if (buildRotationSteps === 0) finalZ -= 2; else if (buildRotationSteps === 1) finalX -= 2; else if (buildRotationSteps === 2) finalZ += 2; else if (buildRotationSteps === 3) finalX += 2;
+          } else if (item === 'platform') {
+            finalY -= 1.5;
+          }
+
+          if (dragBuildLock) {
+            if (dragBuildLock.axis === 'x') finalX = dragBuildLock.value;
+            if (dragBuildLock.axis === 'y') finalY = dragBuildLock.value;
+            if (dragBuildLock.axis === 'z') finalZ = dragBuildLock.value;
+          }
+
+          buildGhost.position.set(finalX, finalY, finalZ);
+          buildGhost.rotation.set(rotX, rotY, 0);
+          buildTarget = { x: finalX, y: finalY, z: finalZ, ry: rotY, rx: rotX };
+
+          buildGhost.updateMatrixWorld(true);
+          const activeBg = item === 'block' ? bgBlock : (item === 'wall' ? bgWall : (item === 'ramp' ? bgRamp : bgPlatform));
+          const ghostBox = new THREE.Box3().setFromObject(activeBg).expandByScalar(-0.1);
+          let overlap = false;
+          for (const b of worldBuilds) {
+            if (!b.mesh.userData.box) b.mesh.userData.box = new THREE.Box3().setFromObject(b.mesh).expandByScalar(-0.1);
+            if (ghostBox.intersectsBox(b.mesh.userData.box)) { overlap = true; break; }
+          }
+          
+          buildCanPlace = !overlap;
+          setGhostColor(buildGhost, buildCanPlace);
+
+          if (isDraggingBuild && buildCanPlace) {
+            const cellKey = `${finalX},${finalY},${finalZ}`;
+            if (cellKey !== lastBuiltCell) {
+              lastBuiltCell = cellKey;
+              const bType = godmode ? godmodeBuildType : item;
+              socket.emit('placeBuild', { type: bType, ...buildTarget });
+              if (!godmode) {
+                inventory[0].ammo--;
+                updateInventoryUI();
+                if (inventory[0].ammo <= 0) { shiftInventory(bType, null); isDraggingBuild = false; }
+              }
+            }
+          }
+      } else if (item === 'bridge_gun' && !godmode) {
+        playerGhost.visible = false;
+        buildGrid.visible = false;
+        groundGrid.visible = false;
+        buildGhost.visible = false;
+
+        hoverRaycaster.setFromCamera(lastMouseNDC, camera);
+        const hits = hoverRaycaster.intersectObjects([...levelMeshes, ...worldBuilds.map(b => b.mesh)], false);
+        if (hits.length > 0) {
+          const targetPt = hits[0].point;
+          const origin = new THREE.Vector3().copy(localPlayer.position).add(new THREE.Vector3(0, -0.4, 0));
+          const target = targetPt.clone();
+          let dist = origin.distanceTo(target);
+          if (dist > 100) {
+            dist = 100;
+            target.copy(origin).add(new THREE.Vector3().subVectors(target, origin).normalize().multiplyScalar(100));
+          }
+          const mid = origin.clone().lerp(target, 0.5);
+          const dir = new THREE.Vector3().subVectors(target, origin).normalize();
+
+          bridgeGhost.scale.set(1, 1, dist);
+          bridgeGhost.position.copy(mid);
+          bridgeGhost.rotation.order = 'YXZ';
+          bridgeGhost.rotation.set(-Math.asin(dir.y), Math.atan2(dir.x, dir.z), 0);
+          bridgeGhost.visible = true;
+        } else {
+          if (bridgeGhost) bridgeGhost.visible = false;
+        }
+      } else {
+        playerGhost.visible = false;
+        buildGrid.visible = false;
+        groundGrid.visible = false;
+        buildGhost.visible = false;
+        if (bridgeGhost) bridgeGhost.visible = false;
+      }
+    } else {
+      if (playerGhost && playerGhost.visible) playerGhost.visible = false;
+      if (buildGrid && buildGrid.visible) buildGrid.visible = false;
+      if (groundGrid && groundGrid.visible) groundGrid.visible = false;
+      if (buildGhost && buildGhost.visible) buildGhost.visible = false;
+      if (bridgeGhost && bridgeGhost.visible) bridgeGhost.visible = false;
+    }
 
     // Teleport logic
     let onTeleporter = false;
@@ -3518,6 +3904,9 @@ function animate() {
     } else {
       scoreboardEl.style.display = 'none';
     }
+
+    sunLight.position.set(camera.position.x + 80, camera.position.y + 150, camera.position.z + 60);
+    sunLight.target.position.copy(camera.position);
 
     checkInactivity();
   }
