@@ -304,7 +304,7 @@ let grappleLine = null;
 let pendingTeleporter = null;
 let pendingTeleporterMesh = null;
 const worldTeleporters = [];
-let lastTeleporterUsed = null;
+let teleporterCooldownTimer = 0;
 const activeBullets = [];
 const activeRockets = [];
 const worldMines = [];
@@ -814,7 +814,7 @@ function returnToMenu() {
   if (grappleLine) grappleLine.visible = false;
   if (pendingTeleporterMesh) { scene.remove(pendingTeleporterMesh); pendingTeleporterMesh = null; }
   pendingTeleporter = null;
-  lastTeleporterUsed = null;
+  teleporterCooldownTimer = 0;
 
   for (const m of worldMines) scene.remove(m.mesh);
   worldMines.length = 0;
@@ -1242,9 +1242,10 @@ const buildGrid = new THREE.Points(gridPointsGeo, gridPointsMat);
 buildGrid.visible = false;
 scene.add(buildGrid);
 
-const groundGrid = new THREE.GridHelper(GRID_RAD * 8, GRID_RAD * 2, 0x4488ff, 0x4488ff);
+const groundGrid = new THREE.GridHelper(400, 100, 0x66aaff, 0x66aaff);
 groundGrid.material.transparent = true;
 groundGrid.material.opacity = 0;
+groundGrid.material.linewidth = 2; // Supported on some non-Windows platforms
 groundGrid.visible = false;
 scene.add(groundGrid);
 
@@ -2844,6 +2845,7 @@ function addBuildToWorld(b) {
     geo = new THREE.BoxGeometry(w, h, d); shape = new CANNON.Box(new CANNON.Vec3(w/2, h/2, d/2));
   }
   const mesh = new THREE.Mesh(geo, mat);
+  mesh.userData.type = b.type;
   mesh.position.set(b.x, b.y, b.z);
   mesh.rotation.order = 'YXZ';
   if (b.ry) mesh.rotation.y = b.ry;
@@ -3557,9 +3559,9 @@ function animate() {
         groundGrid.position.set(px, py, pz);
 
         const distToGrid = camera.position.distanceTo(groundGrid.position);
-        const opacity = 1.0 - THREE.MathUtils.smoothstep(20, 60, distToGrid);
-        groundGrid.material.opacity = opacity * 0.3;
-        buildGrid.material.opacity = opacity * 0.5;
+        const opacity = 1.0 - THREE.MathUtils.smoothstep(50, 150, distToGrid);
+        groundGrid.material.opacity = opacity * 0.6;
+        buildGrid.material.opacity = opacity * 0.8;
 
         hoverRaycaster.setFromCamera(lastMouseNDC, camera);
         const hits = hoverRaycaster.intersectObjects([...levelMeshes, ...worldBuilds.map(b => b.mesh)], false);
@@ -3613,13 +3615,12 @@ function animate() {
           buildGhost.rotation.set(rotX, rotY, 0);
           buildTarget = { x: finalX, y: finalY, z: finalZ, ry: rotY, rx: rotX };
 
-          buildGhost.updateMatrixWorld(true);
-          const activeBg = item === 'block' ? bgBlock : (item === 'wall' ? bgWall : (item === 'ramp' ? bgRamp : bgPlatform));
-          const ghostBox = new THREE.Box3().setFromObject(activeBg).expandByScalar(-0.1);
           let overlap = false;
           for (const b of worldBuilds) {
-            if (!b.mesh.userData.box) b.mesh.userData.box = new THREE.Box3().setFromObject(b.mesh).expandByScalar(-0.1);
-            if (ghostBox.intersectsBox(b.mesh.userData.box)) { overlap = true; break; }
+            const isSamePos = b.mesh.position.distanceTo(buildGhost.position) < 0.1;
+            const isSameType = b.mesh.userData.type === item;
+            const isSameRot = Math.abs(b.mesh.rotation.y - buildGhost.rotation.y) < 0.1 && Math.abs(b.mesh.rotation.x - buildGhost.rotation.x) < 0.1;
+            if (isSamePos && isSameType && isSameRot) { overlap = true; break; }
           }
           
           buildCanPlace = !overlap;
@@ -3682,30 +3683,34 @@ function animate() {
     }
 
     // Teleport logic
-    let onTeleporter = false;
+    if (teleporterCooldownTimer > 0) teleporterCooldownTimer -= delta;
     if (localPlayer && localBody) {
       for (const wt of worldTeleporters) {
         const distA = localPlayer.position.distanceTo(wt.a);
         const distB = localPlayer.position.distanceTo(wt.b);
-        if (distA < 1.5 || distB < 1.5) {
-          onTeleporter = true;
-          if (lastTeleporterUsed !== wt) {
-            if (distA < 1.5) {
-              localBody.position.set(wt.b.x, wt.b.y + 1.5, wt.b.z);
-              playWorldSound(boostSound, wt.b, 1.0);
-            } else {
-              localBody.position.set(wt.a.x, wt.a.y + 1.5, wt.a.z);
-              playWorldSound(boostSound, wt.a, 1.0);
-            }
-            lastTeleporterUsed = wt;
+        if ((distA < 1.5 || distB < 1.5) && teleporterCooldownTimer <= 0) {
+          if (distA < 1.5) {
+            localBody.position.set(wt.b.x, wt.b.y + 1.5, wt.b.z);
+            playWorldSound(boostSound, wt.b, 1.0);
+          } else {
+            localBody.position.set(wt.a.x, wt.a.y + 1.5, wt.a.z);
+            playWorldSound(boostSound, wt.a, 1.0);
           }
+          teleporterCooldownTimer = 1.5;
         }
       }
     }
-    if (!onTeleporter) lastTeleporterUsed = null;
   } // End of local physics block
 
   // --- WORLD ENTITY UPDATES (Always run, even in main menu) ---
+
+    for (const wt of worldTeleporters) {
+      for (let i = 0; i < 2; i++) {
+        const t = Math.random();
+        const p = new THREE.Vector3().lerpVectors(wt.a, wt.b, t);
+        spawnParticle(p.x, p.y + Math.random() * 0.5, p.z, (Math.random() - 0.5) * 0.5, Math.random(), (Math.random() - 0.5) * 0.5, 0.2, 1.0, 0.2, 0.7, 3, 0.6, 0);
+      }
+    }
 
     // Machine gun bullets
     for (let i = activeBullets.length - 1; i >= 0; i--) {
