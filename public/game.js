@@ -307,11 +307,149 @@ const activeBullets = [];
 const activeRockets = [];
 const worldMines = [];
 const activeCoinsList = [];
-const activeParticles = [];
 const worldPads = [];
-const trailGeo = new THREE.SphereGeometry(0.6, 6, 6);
-const trailMat = new THREE.MeshBasicMaterial({ color: 0xdddddd, transparent: true, opacity: 0.8 });
-const activeExplosions = [];
+const pendingImpulses = [];
+
+// --- GPU Particle System (Points-based) ---
+const MAX_PARTICLES = 2000;
+const particlePositions = new Float32Array(MAX_PARTICLES * 3);
+const particleColors = new Float32Array(MAX_PARTICLES * 4);
+const particleSizes = new Float32Array(MAX_PARTICLES);
+const particleVelocities = new Float32Array(MAX_PARTICLES * 3);
+const particleLifes = new Float32Array(MAX_PARTICLES);
+const particleMaxLifes = new Float32Array(MAX_PARTICLES);
+const particleGravities = new Float32Array(MAX_PARTICLES);
+let particleCount = 0;
+
+const particleGeo = new THREE.BufferGeometry();
+particleGeo.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+particleGeo.setAttribute('color', new THREE.BufferAttribute(particleColors, 4));
+particleGeo.setAttribute('size', new THREE.BufferAttribute(particleSizes, 1));
+
+const particleMat = new THREE.ShaderMaterial({
+  uniforms: {},
+  vertexShader: `
+    attribute float size;
+    attribute vec4 color;
+    varying vec4 vColor;
+    void main() {
+      vColor = color;
+      vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = size * (200.0 / -mvPosition.z);
+      gl_Position = projectionMatrix * mvPosition;
+    }
+  `,
+  fragmentShader: `
+    varying vec4 vColor;
+    void main() {
+      float d = length(gl_PointCoord - vec2(0.5));
+      if (d > 0.5) discard;
+      float alpha = vColor.a * smoothstep(0.5, 0.15, d);
+      gl_FragColor = vec4(vColor.rgb, alpha);
+    }
+  `,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending
+});
+
+const particleSystem = new THREE.Points(particleGeo, particleMat);
+particleSystem.frustumCulled = false;
+scene.add(particleSystem);
+
+function spawnParticle(x, y, z, vx, vy, vz, r, g, b, a, size, life, gravity) {
+  if (particleCount >= MAX_PARTICLES) return;
+  const i = particleCount;
+  particlePositions[i * 3] = x;
+  particlePositions[i * 3 + 1] = y;
+  particlePositions[i * 3 + 2] = z;
+  particleVelocities[i * 3] = vx;
+  particleVelocities[i * 3 + 1] = vy;
+  particleVelocities[i * 3 + 2] = vz;
+  particleColors[i * 4] = r;
+  particleColors[i * 4 + 1] = g;
+  particleColors[i * 4 + 2] = b;
+  particleColors[i * 4 + 3] = a;
+  particleSizes[i] = size;
+  particleLifes[i] = life;
+  particleMaxLifes[i] = life;
+  particleGravities[i] = gravity;
+  particleCount++;
+}
+
+function spawnExplosion(x, y, z, isMine) {
+  const count = isMine ? 20 : 30;
+  const speed = isMine ? 8 : 12;
+  for (let i = 0; i < count; i++) {
+    const dir = new THREE.Vector3(Math.random() - 0.5, Math.random() * 0.8, Math.random() - 0.5).normalize();
+    const spd = speed * (0.4 + Math.random() * 0.6);
+    const t = Math.random();
+    const r = isMine ? 1.0 : (t < 0.3 ? 1.0 : 1.0);
+    const g = isMine ? (t * 0.3) : (0.3 + t * 0.5);
+    const b = isMine ? 0 : (t * 0.1);
+    const size = (isMine ? 3 : 4) + Math.random() * 3;
+    const life = 0.3 + Math.random() * 0.5;
+    spawnParticle(x, y, z, dir.x * spd, dir.y * spd, dir.z * spd, r, g, b, 1.0, size, life, -3);
+  }
+  // Smoke ring
+  for (let i = 0; i < 8; i++) {
+    const angle = (i / 8) * Math.PI * 2;
+    const spd = 3 + Math.random() * 2;
+    spawnParticle(x, y, z, Math.cos(angle) * spd, 1 + Math.random() * 2, Math.sin(angle) * spd, 0.4, 0.4, 0.4, 0.6, 5 + Math.random() * 3, 0.6 + Math.random() * 0.4, -1);
+  }
+}
+
+function spawnTrailParticle(x, y, z) {
+  const spread = 0.15;
+  spawnParticle(
+    x + (Math.random() - 0.5) * spread,
+    y + (Math.random() - 0.5) * spread,
+    z + (Math.random() - 0.5) * spread,
+    (Math.random() - 0.5) * 0.5, (Math.random() - 0.5) * 0.5, (Math.random() - 0.5) * 0.5,
+    1.0, 0.65, 0.2, 0.8,
+    2 + Math.random(), 0.2 + Math.random() * 0.1, 0
+  );
+}
+
+function updateParticles(delta) {
+  let writeIdx = 0;
+  for (let i = 0; i < particleCount; i++) {
+    particleLifes[i] -= delta;
+    if (particleLifes[i] <= 0) continue;
+
+    particleVelocities[i * 3 + 1] += particleGravities[i] * delta;
+    particlePositions[i * 3] += particleVelocities[i * 3] * delta;
+    particlePositions[i * 3 + 1] += particleVelocities[i * 3 + 1] * delta;
+    particlePositions[i * 3 + 2] += particleVelocities[i * 3 + 2] * delta;
+
+    const pct = particleLifes[i] / particleMaxLifes[i];
+    particleColors[i * 4 + 3] = pct;
+    particleSizes[i] *= (1 + delta * 0.5);
+
+    if (writeIdx !== i) {
+      particlePositions[writeIdx * 3] = particlePositions[i * 3];
+      particlePositions[writeIdx * 3 + 1] = particlePositions[i * 3 + 1];
+      particlePositions[writeIdx * 3 + 2] = particlePositions[i * 3 + 2];
+      particleVelocities[writeIdx * 3] = particleVelocities[i * 3];
+      particleVelocities[writeIdx * 3 + 1] = particleVelocities[i * 3 + 1];
+      particleVelocities[writeIdx * 3 + 2] = particleVelocities[i * 3 + 2];
+      particleColors[writeIdx * 4] = particleColors[i * 4];
+      particleColors[writeIdx * 4 + 1] = particleColors[i * 4 + 1];
+      particleColors[writeIdx * 4 + 2] = particleColors[i * 4 + 2];
+      particleColors[writeIdx * 4 + 3] = particleColors[i * 4 + 3];
+      particleSizes[writeIdx] = particleSizes[i];
+      particleLifes[writeIdx] = particleLifes[i];
+      particleMaxLifes[writeIdx] = particleMaxLifes[i];
+      particleGravities[writeIdx] = particleGravities[i];
+    }
+    writeIdx++;
+  }
+  particleCount = writeIdx;
+  particleGeo.setDrawRange(0, particleCount);
+  particleGeo.attributes.position.needsUpdate = true;
+  particleGeo.attributes.color.needsUpdate = true;
+  particleGeo.attributes.size.needsUpdate = true;
+}
 
 // --- Inventory HUD ---
 const inventoryHud = document.createElement('div');
@@ -379,6 +517,21 @@ function shiftInventory(item, targetPt) {
   }
 }
 
+function getAimDirection() {
+  const ndc = isMobile ? new THREE.Vector2(0, 0) : lastMouseNDC;
+  const ray = new THREE.Raycaster();
+  ray.setFromCamera(ndc, camera);
+  const playerOrigin = new THREE.Vector3().copy(localBody.position).add(new THREE.Vector3(0, 0.4, 0));
+  const hits = ray.intersectObjects(levelMeshes, false);
+  let aimPoint;
+  if (hits.length > 0 && hits[0].distance > 15) {
+    aimPoint = hits[0].point;
+  } else {
+    aimPoint = ray.ray.origin.clone().addScaledVector(ray.ray.direction, 150);
+  }
+  return aimPoint.sub(playerOrigin).normalize();
+}
+
 function consumeItem(targetPt) {
   if (inventory.length === 0) return;
   const item = inventory[0].type;
@@ -413,65 +566,68 @@ function consumeItem(targetPt) {
       pendingTeleporter = null;
     }
   } else if (item === 'rocket') {
-    if (!targetPt || !localBody) return;
-    let finalTarget;
-    if (targetPt) {
-      finalTarget = targetPt.clone();
-    } else {
-      const ray = new THREE.Raycaster();
-      const ndc = isMobile ? new THREE.Vector2(0,0) : lastMouseNDC;
-      ray.setFromCamera(ndc, camera);
-      finalTarget = camera.position.clone().addScaledVector(ray.ray.direction, 100);
-    }
+    if (!localBody || rocketCooldownTimer > 0) return;
+    const fireDir = getAimDirection();
 
-    const origin = new THREE.Vector3().copy(localBody.position).add(new THREE.Vector3(0, 1.0, 0));
-    const dirToTarget = new THREE.Vector3().subVectors(finalTarget, origin).normalize();
-    const start = origin.clone().addScaledVector(dirToTarget, 2.0);
-    let dist = start.distanceTo(finalTarget);
-    
-    // Force distance forward to prevent instant self-kills when looking straight down
-    if (dist < 15) {
-      finalTarget = start.clone().addScaledVector(dirToTarget, 15);
-      dist = 15;
-    } else if (dist > 60) {
-      finalTarget = start.clone().addScaledVector(dirToTarget, 60);
-      dist = 60;
-    }
+    const origin = new THREE.Vector3().copy(localBody.position).add(new THREE.Vector3(0, 0.4, 0));
+    const start = origin.clone().addScaledVector(fireDir, 2.5);
 
-    const t = dist / 60; // Flight time (60 units/sec)
-    const velocity = { x: (finalTarget.x - start.x) / t, y: ((finalTarget.y - start.y) - 0.5 * -20 * t * t) / t, z: (finalTarget.z - start.z) / t };
+    const ROCKET_SPEED = 60;
+    const velocity = { x: fireDir.x * ROCKET_SPEED, y: fireDir.y * ROCKET_SPEED, z: fireDir.z * ROCKET_SPEED };
     socket.emit('fireRocket', { start, velocity });
+
+    rocketCooldownTimer = 2.0;
+    inventory[0].ammo--;
+    updateInventoryUI();
+    if (inventory[0].ammo <= 0) {
+      shiftInventory(item, targetPt);
+    }
+    return;
   }
-  
+
   shiftInventory(item, targetPt);
 }
 
 let machinegunInterval = null;
+let rocketCooldownTimer = 0;
+
+function findLockOnTarget(origin, aimDir) {
+  let best = null;
+  let bestDist = Infinity;
+  const lockOnRadius = 3.0;
+  for (const [id, group] of remotePlayers) {
+    const toPlayer = new THREE.Vector3().subVectors(group.position, origin);
+    const projDist = toPlayer.dot(aimDir);
+    if (projDist < 2 || projDist > 80) continue;
+    const closest = origin.clone().addScaledVector(aimDir, projDist);
+    const perpDist = closest.distanceTo(group.position);
+    if (perpDist < lockOnRadius && projDist < bestDist) {
+      bestDist = projDist;
+      best = group.position;
+    }
+  }
+  return best;
+}
 
 function startMachinegun() {
   if (machinegunInterval) return;
   machinegunInterval = setInterval(() => {
     if (!localBody || inventory.length === 0 || inventory[0].type !== 'machinegun') { stopMachinegun(); return; }
-    const ndc = isMobile ? new THREE.Vector2(0,0) : lastMouseNDC;
-    const targetPt = getAimPoint(ndc, true);
-    let finalTarget;
-    if (targetPt) {
-      finalTarget = targetPt.clone();
-    } else {
-      const ray = new THREE.Raycaster();
-      ray.setFromCamera(ndc, camera);
-      finalTarget = camera.position.clone().addScaledVector(ray.ray.direction, 100);
+    const origin = new THREE.Vector3().copy(localBody.position).add(new THREE.Vector3(0, 0.4, 0));
+    let baseDir = getAimDirection();
+
+    const lockTarget = findLockOnTarget(origin, baseDir);
+    if (lockTarget) {
+      baseDir = new THREE.Vector3().subVectors(lockTarget, origin).normalize();
     }
-    const origin = new THREE.Vector3().copy(localBody.position).add(new THREE.Vector3(0, 1.0, 0));
-    const baseDir = new THREE.Vector3().subVectors(finalTarget, origin).normalize();
-    
+
     const noisyDir = baseDir.clone();
-    noisyDir.x += (Math.random() - 0.5) * 0.08;
-    noisyDir.y += (Math.random() - 0.5) * 0.08;
-    noisyDir.z += (Math.random() - 0.5) * 0.08;
+    noisyDir.x += (Math.random() - 0.5) * 0.04;
+    noisyDir.y += (Math.random() - 0.5) * 0.04;
+    noisyDir.z += (Math.random() - 0.5) * 0.04;
     noisyDir.normalize();
 
-    const start = origin.clone().addScaledVector(noisyDir, 1.5);
+    const start = origin.clone().addScaledVector(noisyDir, 2.0);
     socket.emit('fireMachinegun', { start, velocity: noisyDir.multiplyScalar(200) });
     inventory[0].ammo--;
     updateInventoryUI();
@@ -643,17 +799,13 @@ function returnToMenu() {
   }
   activeCoinsList.length = 0;
 
-  for (const p of activeParticles) scene.remove(p.mesh);
-  activeParticles.length = 0;
+  particleCount = 0;
 
   for (const b of activeBullets) scene.remove(b.mesh);
   activeBullets.length = 0;
 
   for (const p of worldPads) scene.remove(p.mesh);
   worldPads.length = 0;
-
-  for (const ex of activeExplosions) scene.remove(ex.mesh);
-  activeExplosions.length = 0;
 
   if (machinegunInterval) { clearInterval(machinegunInterval); machinegunInterval = null; }
 
@@ -1886,6 +2038,9 @@ function handleMovement(delta) {
     jumpBufferTimer = 0;
   }
 
+  // Rocket cooldown tick
+  if (rocketCooldownTimer > 0) rocketCooldownTimer -= delta;
+
   // Tag cooldown tick
   if (tagCooldownTimer > 0) tagCooldownTimer -= delta;
 
@@ -2198,30 +2353,35 @@ function findLeader() {
 
 // --- Tag cooldown strobe ---
 function updateTagStrobe() {
-  if (tagCooldownTimer <= 0) return;
+  const t = performance.now() * 0.008;
+  const pulse = 0.7 + Math.sin(t) * 0.3;
 
-  const t = performance.now() * 0.012;
-  const r = Math.sin(t) * 0.5 + 0.5;
-  const g = Math.sin(t + 2.1) * 0.5 + 0.5;
-  const b = Math.sin(t + 4.2) * 0.5 + 0.5;
-
-  // Strobe the holder's outline
   if (holderID === selfId && localOutline) {
     localOutline.visible = true;
-    localOutline.material.color.setRGB(r, g, b);
+    if (tagCooldownTimer > 0) {
+      const flash = Math.sin(t * 3) * 0.5 + 0.5;
+      localOutline.material.color.setRGB(1, 0.84 * flash, 0);
+    } else {
+      localOutline.material.color.setRGB(pulse, pulse * 0.75, 0);
+    }
   }
   for (const [id, outline] of playerOutlines) {
     if (id === holderID) {
       outline.visible = true;
-      outline.material.color.setRGB(r, g, b);
+      if (tagCooldownTimer > 0) {
+        const flash = Math.sin(t * 3) * 0.5 + 0.5;
+        outline.material.color.setRGB(1, 0.84 * flash, 0);
+      } else {
+        outline.material.color.setRGB(pulse, pulse * 0.75, 0);
+      }
     }
   }
 }
 
 function resetOutlineColors() {
-  if (localOutline) localOutline.material.color.set(0xffffff);
+  if (localOutline) localOutline.material.color.set(0xffd700);
   for (const [id, outline] of playerOutlines) {
-    outline.material.color.set(0xffffff);
+    outline.material.color.set(0xffd700);
   }
 }
 
@@ -2431,7 +2591,7 @@ socket.on('pedestalsUpdated', (peds) => {
 
 socket.on('itemPickedUp', (item) => {
   if (inventory.length < MAX_INVENTORY) {
-    inventory.push({ type: item, ammo: item === 'machinegun' ? 100 : 0 });
+    inventory.push({ type: item, ammo: item === 'machinegun' ? 100 : (item === 'rocket' ? 3 : 0) });
     console.log(`Picked up ${item}! Inventory:`, inventory);
     updateInventoryUI();
   }
@@ -2505,42 +2665,41 @@ socket.on('applyImpulse', (data) => {
 });
 
 socket.on('rocketFired', (data) => {
-  const geo = new THREE.CylinderGeometry(0.1, 0.1, 0.6, 8);
+  const geo = new THREE.CylinderGeometry(0.05, 0.15, 0.8, 8);
   geo.rotateX(Math.PI / 2);
-  const mat = new THREE.MeshStandardMaterial({ color: 0xff2222, emissive: 0x550000 });
+  const mat = new THREE.MeshStandardMaterial({ color: 0xff2222, emissive: 0xff4400, emissiveIntensity: 0.6 });
   const mesh = new THREE.Mesh(geo, mat);
   const start = new THREE.Vector3(data.start.x, data.start.y, data.start.z);
   const velocity = new THREE.Vector3(data.velocity.x, data.velocity.y, data.velocity.z);
   mesh.position.copy(start);
   mesh.lookAt(new THREE.Vector3().copy(start).add(velocity));
+  scene.add(mesh);
   activeRockets.push({ mesh, pos: start, velocity, life: 5, owner: data.owner });
   playWorldSound(boostSound, start, 1.0);
 });
 
 socket.on('explosion', (pos) => {
   const p = new THREE.Vector3(pos.x, pos.y, pos.z);
-  const geo = new THREE.SphereGeometry(2, 16, 16);
-  const mat = new THREE.MeshBasicMaterial({ color: 0xff6600, transparent: true, opacity: 1.0 });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.position.copy(p);
-  scene.add(mesh);
+  const isMine = pos.type === 'mine';
+  spawnExplosion(p.x, p.y, p.z, isMine);
   playRandomBombSound(p);
-  activeExplosions.push({ mesh, life: 0.5, maxLife: 0.5 });
 
   if (localPlayer && localBody) {
     const dist = localPlayer.position.distanceTo(p);
-    if (dist < 8) {
+    const blastRadius = isMine ? 6 : 8;
+    if (dist < blastRadius) {
       const dir = new THREE.Vector3().subVectors(localPlayer.position, p).normalize();
-        dir.y = Math.max(0.5, dir.y + 1.0); // Force it upwards significantly
-        dir.normalize(); 
-        const force = (8 - dist) * 12; // Max force 96 for dramatic knockback
-      localBody.wakeUp(); // Ensure physics engine registers the hit
-        localBody.position.y += 0.5; // Pop well off the ground to break friction instantly
-      localBody.velocity.x += dir.x * force;
-        localBody.velocity.y = Math.max(localBody.velocity.y, 0) + dir.y * force;
-      localBody.velocity.z += dir.z * force;
-      const hSpeedAfter = Math.sqrt(localBody.velocity.x ** 2 + localBody.velocity.z ** 2);
-      speedCapCurrent = Math.max(speedCapCurrent, hSpeedAfter);
+      if (isMine) {
+        dir.y = Math.max(0.3, dir.y + 0.4);
+        dir.normalize();
+        const force = (blastRadius - dist) * 18;
+        pendingImpulses.push({ dir, force, popY: 1.0 });
+      } else {
+        dir.y = Math.max(0.5, dir.y + 1.0);
+        dir.normalize();
+        const force = (blastRadius - dist) * 14;
+        pendingImpulses.push({ dir, force, popY: 1.5 });
+      }
     }
   }
 });
@@ -2633,25 +2792,32 @@ debugEl.style.cssText = 'position:absolute;top:10px;right:10px;width:300px;color
 document.body.appendChild(debugEl);
 
 // --- Debug Projectile Visuals ---
+const DEBUG_RENDER_ORDER = 999;
+
 const debugLineGeo = new THREE.BufferGeometry();
-const debugLineMat = new THREE.LineBasicMaterial({ color: 0x00ff00 });
+const debugLineMat = new THREE.LineBasicMaterial({ color: 0x00ff00, depthTest: false, transparent: true, opacity: 0.8 });
 const debugAimLine = new THREE.Line(debugLineGeo, debugLineMat);
 debugAimLine.visible = false;
+debugAimLine.renderOrder = DEBUG_RENDER_ORDER;
+debugAimLine.frustumCulled = false;
 scene.add(debugAimLine);
 
 const debugArcGeo = new THREE.BufferGeometry();
-const debugArcMat = new THREE.LineBasicMaterial({ color: 0xffa500 });
+const debugArcMat = new THREE.LineBasicMaterial({ color: 0xffa500, depthTest: false, transparent: true, opacity: 0.8 });
 const debugArcLine = new THREE.Line(debugArcGeo, debugArcMat);
 debugArcLine.visible = false;
+debugArcLine.renderOrder = DEBUG_RENDER_ORDER;
+debugArcLine.frustumCulled = false;
 scene.add(debugArcLine);
 
 const debugDistCanvas = document.createElement('canvas');
-debugDistCanvas.width = 128; debugDistCanvas.height = 64;
+debugDistCanvas.width = 256; debugDistCanvas.height = 64;
 const debugDistCtx = debugDistCanvas.getContext('2d');
 const debugDistTex = new THREE.CanvasTexture(debugDistCanvas);
 const debugDistMat = new THREE.SpriteMaterial({ map: debugDistTex, depthTest: false });
 const debugDistSprite = new THREE.Sprite(debugDistMat);
-debugDistSprite.scale.set(3, 1.5, 1);
+debugDistSprite.scale.set(4, 1, 1);
+debugDistSprite.renderOrder = DEBUG_RENDER_ORDER;
 debugDistSprite.visible = false;
 scene.add(debugDistSprite);
 
@@ -2659,12 +2825,159 @@ const debugCrosshair = document.createElement('div');
 debugCrosshair.style.cssText = 'position:absolute;width:16px;height:16px;border:2px solid #0f0;border-radius:50%;transform:translate(-50%,-50%);pointer-events:none;z-index:9999;display:none;';
 document.body.appendChild(debugCrosshair);
 
+// --- Debug hit marker ---
+const debugHitMarkerGeo = new THREE.RingGeometry(0.6, 0.9, 16);
+const debugHitMarkerMat = new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: 0.6, depthTest: false, side: THREE.DoubleSide });
+const debugHitMarker = new THREE.Mesh(debugHitMarkerGeo, debugHitMarkerMat);
+debugHitMarker.visible = false;
+debugHitMarker.renderOrder = DEBUG_RENDER_ORDER;
+debugHitMarker.frustumCulled = false;
+scene.add(debugHitMarker);
+
+// --- Debug spread cone ---
+const SPREAD_HALF_ANGLE = Math.atan(0.06);
+const CONE_LENGTH = 30;
+const CONE_SEGMENTS = 12;
+const debugConeGroup = new THREE.Group();
+debugConeGroup.visible = false;
+scene.add(debugConeGroup);
+
+const coneCenterMat = new THREE.LineBasicMaterial({ color: 0x00ff00, depthTest: false });
+const coneEdgeMat = new THREE.LineBasicMaterial({ color: 0x00ff00, depthTest: false, transparent: true, opacity: 0.4 });
+const coneRingMat = new THREE.LineBasicMaterial({ color: 0x00ff00, depthTest: false, transparent: true, opacity: 0.3 });
+
+const coneCenterGeo = new THREE.BufferGeometry();
+const coneCenterLine = new THREE.Line(coneCenterGeo, coneCenterMat);
+coneCenterLine.renderOrder = DEBUG_RENDER_ORDER;
+coneCenterLine.frustumCulled = false;
+debugConeGroup.add(coneCenterLine);
+
+const coneEdgeLines = [];
+for (let i = 0; i < CONE_SEGMENTS; i++) {
+  const geo = new THREE.BufferGeometry();
+  const line = new THREE.Line(geo, coneEdgeMat);
+  line.renderOrder = DEBUG_RENDER_ORDER;
+  line.frustumCulled = false;
+  debugConeGroup.add(line);
+  coneEdgeLines.push(line);
+}
+
+const coneRingLines = [];
+for (const ringDist of [0.33, 0.66, 1.0]) {
+  const geo = new THREE.BufferGeometry();
+  const line = new THREE.LineLoop(geo, coneRingMat);
+  line.renderOrder = DEBUG_RENDER_ORDER;
+  line.frustumCulled = false;
+  debugConeGroup.add(line);
+  coneRingLines.push({ line, pct: ringDist });
+}
+
+function debugCheckHit(origin, aimDir) {
+  let hitTarget = null;
+  let hitDist = Infinity;
+
+  for (const [id, group] of remotePlayers) {
+    const toPlayer = new THREE.Vector3().subVectors(group.position, origin);
+    const projDist = toPlayer.dot(aimDir);
+    if (projDist < 0 || projDist > CONE_LENGTH) continue;
+
+    const closest = origin.clone().addScaledVector(aimDir, projDist);
+    const perpDist = closest.distanceTo(group.position);
+    const coneRadiusAtDist = Math.tan(SPREAD_HALF_ANGLE) * projDist;
+    const hitRadius = 1.5;
+
+    if (perpDist < coneRadiusAtDist + hitRadius && projDist < hitDist) {
+      hitDist = projDist;
+      hitTarget = { id, group, dist: projDist, perpDist, inCenter: perpDist < hitRadius };
+    }
+  }
+  return hitTarget;
+}
+
+function updateDebugCone(origin, aimDir, hitInfo) {
+  const up = new THREE.Vector3(0, 1, 0);
+  if (Math.abs(aimDir.dot(up)) > 0.99) up.set(1, 0, 0);
+  const right = new THREE.Vector3().crossVectors(aimDir, up).normalize();
+  const camUp = new THREE.Vector3().crossVectors(right, aimDir).normalize();
+
+  const coneEnd = origin.clone().addScaledVector(aimDir, CONE_LENGTH);
+  coneCenterLine.geometry.setFromPoints([origin, coneEnd]);
+
+  coneCenterMat.color.setHex(hitInfo ? 0xff4444 : 0x00ff00);
+  coneEdgeMat.color.setHex(hitInfo ? 0xff4444 : 0x00ff00);
+  coneRingMat.color.setHex(hitInfo ? 0xff4444 : 0x00ff00);
+
+  const coneRadius = Math.tan(SPREAD_HALF_ANGLE) * CONE_LENGTH;
+
+  for (let i = 0; i < CONE_SEGMENTS; i++) {
+    const angle = (i / CONE_SEGMENTS) * Math.PI * 2;
+    const edgeEnd = coneEnd.clone()
+      .addScaledVector(right, Math.cos(angle) * coneRadius)
+      .addScaledVector(camUp, Math.sin(angle) * coneRadius);
+    coneEdgeLines[i].geometry.setFromPoints([origin, edgeEnd]);
+  }
+
+  for (const ring of coneRingLines) {
+    const ringCenter = origin.clone().addScaledVector(aimDir, CONE_LENGTH * ring.pct);
+    const ringR = Math.tan(SPREAD_HALF_ANGLE) * CONE_LENGTH * ring.pct;
+    const ringPts = [];
+    for (let i = 0; i <= CONE_SEGMENTS; i++) {
+      const angle = (i / CONE_SEGMENTS) * Math.PI * 2;
+      ringPts.push(ringCenter.clone()
+        .addScaledVector(right, Math.cos(angle) * ringR)
+        .addScaledVector(camUp, Math.sin(angle) * ringR));
+    }
+    ring.line.geometry.setFromPoints(ringPts);
+  }
+
+  if (hitInfo) {
+    debugHitMarker.visible = true;
+    debugHitMarker.position.copy(hitInfo.group.position);
+    debugHitMarker.position.y += 0.5;
+    debugHitMarker.lookAt(camera.position);
+    const pulse = 1.0 + Math.sin(performance.now() * 0.01) * 0.3;
+    debugHitMarker.scale.setScalar(pulse);
+    debugHitMarkerMat.color.setHex(hitInfo.inCenter ? 0xff0000 : 0xffaa00);
+    debugHitMarkerMat.opacity = hitInfo.inCenter ? 0.7 : 0.4;
+  } else {
+    debugHitMarker.visible = false;
+  }
+}
+
+// --- Debug front-face marker ---
+const debugFrontGroup = new THREE.Group();
+debugFrontGroup.visible = false;
+scene.add(debugFrontGroup);
+
+const frontArrowPts = [
+  new THREE.Vector3(0, 0, -0.6),
+  new THREE.Vector3(0.25, 0, -0.9),
+  new THREE.Vector3(0, 0, -1.2),
+  new THREE.Vector3(-0.25, 0, -0.9),
+  new THREE.Vector3(0, 0, -0.6),
+];
+const frontArrowGeo = new THREE.BufferGeometry().setFromPoints(frontArrowPts);
+const frontArrowMat = new THREE.LineBasicMaterial({ color: 0x00ffff, depthTest: false });
+const frontArrow = new THREE.Line(frontArrowGeo, frontArrowMat);
+frontArrow.renderOrder = DEBUG_RENDER_ORDER;
+frontArrow.frustumCulled = false;
+debugFrontGroup.add(frontArrow);
+
+const frontDotGeo = new THREE.SphereGeometry(0.06, 6, 6);
+const frontDotMat = new THREE.MeshBasicMaterial({ color: 0x00ffff, depthTest: false });
+const frontDot = new THREE.Mesh(frontDotGeo, frontDotMat);
+frontDot.position.set(0, 0, -0.55);
+frontDot.renderOrder = DEBUG_RENDER_ORDER;
+frontDot.frustumCulled = false;
+debugFrontGroup.add(frontDot);
+
 window.addEventListener('keydown', (e) => {
   if (e.code === 'Backquote') {
     e.preventDefault();
     debugVisible = !debugVisible;
     debugEl.style.display = debugVisible ? '' : 'none';
     gimbal.visible = debugVisible;
+    debugFrontGroup.visible = debugVisible;
   }
   if (e.code === 'F4' && gameStarted) {
     e.preventDefault();
@@ -2681,6 +2994,7 @@ window.addEventListener('keydown', (e) => {
       showSpawnMarkers();
       showGodmodeMenu();
       if (document.pointerLockElement) document.exitPointerLock();
+      socket.emit('godmodeEnter');
     } else if (!godmode && localBody) {
       const dir = new THREE.Vector3();
       camera.getWorldDirection(dir);
@@ -2765,6 +3079,7 @@ function rebuildLocalRoundcube() {
 }
 
 let fpsFrames = 0, fpsTime = 0, fpsDisplay = 0;
+let lastDebugHit = null;
 
 function updateDebug(delta) {
   if (!debugVisible) {
@@ -2772,6 +3087,9 @@ function updateDebug(delta) {
     debugArcLine.visible = false;
     debugDistSprite.visible = false;
     debugCrosshair.style.display = 'none';
+    debugConeGroup.visible = false;
+    debugHitMarker.visible = false;
+    debugFrontGroup.visible = false;
     return;
   }
 
@@ -2781,57 +3099,75 @@ function updateDebug(delta) {
   if (fpsTime >= 0.5) { fpsDisplay = Math.round(fpsFrames / fpsTime); fpsFrames = 0; fpsTime = 0; }
 
   if (localBody) {
-    const ndc = isMobile ? new THREE.Vector2(0,0) : lastMouseNDC;
-    const targetPt = getAimPoint(ndc, true);
-    const origin = new THREE.Vector3().copy(localBody.position).add(new THREE.Vector3(0, 1.0, 0));
-    let finalTarget;
-    if (targetPt) finalTarget = targetPt.clone();
-    else {
-      const ray = new THREE.Raycaster();
-      ray.setFromCamera(ndc, camera);
-      finalTarget = camera.position.clone().addScaledVector(ray.ray.direction, 100);
-    }
+    const origin = new THREE.Vector3().copy(localBody.position).add(new THREE.Vector3(0, 0.4, 0));
+    const aimDir = getAimDirection();
+    const aimEnd = origin.clone().addScaledVector(aimDir, CONE_LENGTH);
+    const dist = CONE_LENGTH;
 
-    const dist = origin.distanceTo(finalTarget);
-    debugAimLine.geometry.setFromPoints([origin, finalTarget]);
+    debugAimLine.geometry.setFromPoints([origin, aimEnd]);
     debugAimLine.visible = true;
 
-    const mid = origin.clone().lerp(finalTarget, 0.5);
+    const hitInfo = debugCheckHit(origin, aimDir);
+    lastDebugHit = hitInfo;
+
+    const levelHit = raycastLevel(origin, aimDir, CONE_LENGTH);
+    const hitsGround = levelHit && levelHit.distance < 5;
+    const aimColor = hitInfo ? 0xff4444 : (hitsGround ? 0xff8800 : 0x00ff00);
+    debugLineMat.color.setHex(aimColor);
+
+    const mid = origin.clone().lerp(aimEnd, 0.5);
     debugDistSprite.position.copy(mid);
     debugDistSprite.visible = true;
-    debugDistCtx.clearRect(0, 0, 128, 64);
-    debugDistCtx.font = '24px "04b_03", Lato, sans-serif';
-    debugDistCtx.fillStyle = '#0f0';
+    debugDistCtx.clearRect(0, 0, 256, 64);
+    debugDistCtx.font = '22px "04b_03", Lato, sans-serif';
     debugDistCtx.textAlign = 'center';
-    debugDistCtx.fillText(dist.toFixed(1) + 'm', 64, 32);
+    if (hitInfo) {
+      debugDistCtx.fillStyle = '#ff4444';
+      const name = playerNames.get(hitInfo.id) || 'Player';
+      debugDistCtx.fillText(dist.toFixed(1) + 'm  HIT: ' + name, 128, 28);
+      debugDistCtx.font = '16px "04b_03", Lato, sans-serif';
+      debugDistCtx.fillStyle = hitInfo.inCenter ? '#ff0000' : '#ffaa00';
+      debugDistCtx.fillText(hitInfo.inCenter ? 'CENTER' : 'SPREAD', 128, 52);
+    } else if (hitsGround) {
+      debugDistCtx.fillStyle = '#ff8800';
+      debugDistCtx.fillText(dist.toFixed(1) + 'm  GROUND', 128, 40);
+    } else {
+      debugDistCtx.fillStyle = '#0f0';
+      debugDistCtx.fillText(dist.toFixed(1) + 'm', 128, 40);
+    }
     debugDistTex.needsUpdate = true;
 
     debugCrosshair.style.display = '';
-    debugCrosshair.style.left = ((ndc.x + 1) / 2 * window.innerWidth) + 'px';
-    debugCrosshair.style.top = (-(ndc.y - 1) / 2 * window.innerHeight) + 'px';
+    debugCrosshair.style.borderColor = hitInfo ? '#f44' : '#0f0';
+    const crossNdc = isMobile ? new THREE.Vector2(0, 0) : lastMouseNDC;
+    debugCrosshair.style.left = ((crossNdc.x + 1) / 2 * window.innerWidth) + 'px';
+    debugCrosshair.style.top = (-(crossNdc.y - 1) / 2 * window.innerHeight) + 'px';
 
-    const dirToTarget = new THREE.Vector3().subVectors(finalTarget, origin).normalize();
-    const start = origin.clone().addScaledVector(dirToTarget, 2.0);
-    let rDist = dist;
-    let rTarget = finalTarget.clone();
-    if (rDist < 15) { rTarget = start.clone().addScaledVector(dirToTarget, 15); rDist = 15; }
-    else if (rDist > 60) { rTarget = start.clone().addScaledVector(dirToTarget, 60); rDist = 60; }
-    
-    const t = rDist / 60;
-    const vY = ((rTarget.y - start.y) - 0.5 * -20 * t * t) / t;
-    const velocity = new THREE.Vector3((rTarget.x - start.x) / t, vY, (rTarget.z - start.z) / t);
+    const start = origin.clone().addScaledVector(aimDir, 2.5);
+    const ROCKET_SPEED = 60;
+    const rocketVel = new THREE.Vector3(aimDir.x * ROCKET_SPEED, aimDir.y * ROCKET_SPEED, aimDir.z * ROCKET_SPEED);
 
     const arcPoints = [];
-    for (let i = 0; i <= 20; i++) {
-      const simT = (i / 20) * t;
+    const simDuration = 3;
+    for (let i = 0; i <= 30; i++) {
+      const simT = (i / 30) * simDuration;
       arcPoints.push(new THREE.Vector3(
-        start.x + velocity.x * simT,
-        start.y + velocity.y * simT + 0.5 * -20 * simT * simT,
-        start.z + velocity.z * simT
+        start.x + rocketVel.x * simT,
+        start.y + rocketVel.y * simT + 0.5 * -20 * simT * simT,
+        start.z + rocketVel.z * simT
       ));
     }
     debugArcLine.geometry.setFromPoints(arcPoints);
     debugArcLine.visible = true;
+
+    debugConeGroup.visible = true;
+    updateDebugCone(origin, aimDir, hitInfo);
+
+    if (localPlayer && localMesh) {
+      debugFrontGroup.visible = debugVisible;
+      debugFrontGroup.position.copy(localPlayer.position);
+      debugFrontGroup.quaternion.copy(localMesh.quaternion);
+    }
   }
 
   if (godmode) {
@@ -2857,6 +3193,14 @@ function updateDebug(delta) {
   const sprinting = (keys['ShiftLeft'] || keys['ShiftRight']) && !sprintExhausted;
   const p = localBody.position;
   const myScore = allScores[selfId] || 0;
+
+  const dbgNdc = isMobile ? new THREE.Vector2(0,0) : lastMouseNDC;
+  const dbgRay = new THREE.Raycaster();
+  dbgRay.setFromCamera(dbgNdc, camera);
+  const dbgDir = dbgRay.ray.direction;
+  const dbgItem = inventory.length > 0 ? inventory[0].type : 'none';
+  const dbgAmmo = inventory.length > 0 && inventory[0].ammo > 0 ? inventory[0].ammo : '';
+
   debugEl.textContent =
     `FPS:   ${fpsDisplay}\n` +
     `Speed: ${hSpeed.toFixed(2)} / ${sprinting ? SPRINT_SPEED : MAX_SPEED}\n` +
@@ -2865,6 +3209,11 @@ function updateDebug(delta) {
     `State: ${sprinting ? 'SPRINT' : 'walk'}${sprintExhausted ? ' (exhausted)' : ''}${checkGrounded() ? '' : ' (air)'}\n` +
     `Sprint:${sprintStamina.toFixed(1)}/${SPRINT_DURATION}s\n` +
     `Jump:  ${isChargingJump ? '>' + '='.repeat(Math.round(jumpCharge * 5)) + ' ' + jumpCharge.toFixed(1) + 'x' : (jumpCooldownTimer > 0 ? 'CD ' + jumpCooldownTimer.toFixed(1) + 's' : 'ready')}\n` +
+    `--- AIM ---\n` +
+    `Dir:   (${dbgDir.x.toFixed(2)}, ${dbgDir.y.toFixed(2)}, ${dbgDir.z.toFixed(2)})\n` +
+    `Item:  ${dbgItem}${dbgAmmo ? ' [' + dbgAmmo + ']' : ''}\n` +
+    `Target:${debugHitMarker.visible ? ' ' + (playerNames.get(lastDebugHit?.id) || 'Player') + ' (' + (lastDebugHit?.inCenter ? 'CENTER' : 'SPREAD') + ' ' + lastDebugHit?.dist.toFixed(1) + 'm)' : ' none'}\n` +
+    `Bullets: ${activeBullets.length}  Rockets: ${activeRockets.length}${rocketCooldownTimer > 0 ? '  CD:' + rocketCooldownTimer.toFixed(1) + 's' : ''}\n` +
     `Tag CD:${tagCooldownTimer > 0 ? tagCooldownTimer.toFixed(1) + 's' : 'none'}\n` +
     `Score: ${myScore}  ${holderID === selfId ? '[IT]' : ''}\n` +
     `Chain: ${chainLength.toFixed(1)} [ / ] to adjust\n` +
@@ -2901,6 +3250,16 @@ function animate() {
       }
     } else {
       handleMovement(delta);
+      while (pendingImpulses.length > 0) {
+        const imp = pendingImpulses.shift();
+        localBody.wakeUp();
+        localBody.position.y += imp.popY;
+        localBody.velocity.x += imp.dir.x * imp.force;
+        localBody.velocity.y = Math.max(localBody.velocity.y, 0) + imp.dir.y * imp.force;
+        localBody.velocity.z += imp.dir.z * imp.force;
+        const hSpd = Math.sqrt(localBody.velocity.x ** 2 + localBody.velocity.z ** 2);
+        speedCapCurrent = Math.max(speedCapCurrent, hSpd);
+      }
       updateGroundPlane(localBody);
       if (levelLoaded) world.step(PHYSICS_STEP, delta, 3);
       resolveWallCollisions(localBody);
@@ -2987,21 +3346,22 @@ function animate() {
     for (let i = activeRockets.length - 1; i >= 0; i--) {
       const r = activeRockets[i];
       r.life -= delta;
-      r.velocity.y += -20 * delta; // Gravity
+      r.velocity.y += -8 * delta; // Gravity
       r.pos.addScaledVector(r.velocity, delta);
       r.mesh.position.copy(r.pos);
       r.mesh.lookAt(new THREE.Vector3().copy(r.pos).add(r.velocity));
 
-      if (Math.random() < 0.6) {
-        const pMesh = new THREE.Mesh(trailGeo, trailMat.clone());
-        pMesh.position.copy(r.pos);
-        scene.add(pMesh);
-        activeParticles.push({ mesh: pMesh, life: 0.4, maxLife: 0.4 });
+      if (Math.random() < 0.8) {
+        spawnTrailParticle(r.pos.x, r.pos.y, r.pos.z);
       }
 
       const moveDist = r.velocity.length() * delta;
       let hit = false;
-      if (r.pos.y < 0 || raycastLevel(r.pos, r.velocity.clone().normalize(), moveDist + 0.2)) hit = true;
+      if (r.pos.y < 0 || raycastLevel(r.pos, r.velocity.clone().normalize(), moveDist + 0.5)) hit = true;
+      if (!hit) {
+        const groundHit = raycastLevel(r.pos, new THREE.Vector3(0, -1, 0), 0.5);
+        if (groundHit) hit = true;
+      }
       for (const [id, group] of remotePlayers) if (id !== r.owner && group.position.distanceTo(r.pos) < 1.2) hit = true;
       if (selfId !== r.owner && localPlayer && localPlayer.position.distanceTo(r.pos) < 1.2) hit = true;
 
@@ -3012,37 +3372,8 @@ function animate() {
       }
     }
 
-    // Update particles
-    for (let i = activeParticles.length - 1; i >= 0; i--) {
-      const p = activeParticles[i];
-      p.life -= delta;
-      if (p.life <= 0) {
-        scene.remove(p.mesh);
-        if (p.mesh.material) p.mesh.material.dispose();
-        activeParticles.splice(i, 1);
-      } else {
-        const pct = p.life / p.maxLife;
-        p.mesh.scale.setScalar(1 + (1 - pct) * 1.5);
-        p.mesh.material.opacity = pct * 0.8;
-      }
-    }
-
-    // Update explosions
-    for (let i = activeExplosions.length - 1; i >= 0; i--) {
-      const ex = activeExplosions[i];
-      ex.life -= delta;
-      if (ex.life <= 0) {
-        scene.remove(ex.mesh);
-        if (ex.mesh.material) ex.mesh.material.dispose();
-        if (ex.mesh.geometry) ex.mesh.geometry.dispose();
-        activeExplosions.splice(i, 1);
-      } else {
-        const pct = ex.life / ex.maxLife; // 1 to 0
-        const scale = 1 + (1 - pct) * 5; 
-        ex.mesh.scale.setScalar(scale);
-        ex.mesh.material.opacity = pct;
-      }
-    }
+    // Update GPU particles (explosions + trails)
+    updateParticles(delta);
 
     // Mines
     if (localPlayer) {
@@ -3082,12 +3413,12 @@ function animate() {
 
   if (gameStarted && localBody) {
 
-    if (checkGrounded()) {
+    if (checkGrounded() || localBody.velocity.y >= 0) {
       airTime = 0;
     } else {
       airTime += delta;
     }
-    if (airTime > 5) {
+    if (airTime > 10) {
       const rsp = randomSpawn();
       localBody.position.set(rsp.x, rsp.y, rsp.z);
       localBody.velocity.set(0, 0, 0);

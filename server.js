@@ -214,6 +214,18 @@ io.on('connection', (socket) => {
   socket.on('jump', () => socket.broadcast.emit('playerJumped', socket.id));
   socket.on('sprintStart', () => socket.broadcast.emit('playerSprintStart', socket.id));
 
+  socket.on('godmodeEnter', () => {
+    if (holderID === socket.id) {
+      const candidates = Object.keys(players).filter(id => id !== socket.id);
+      if (candidates.length > 0) {
+        holderID = candidates[Math.floor(Math.random() * candidates.length)];
+        tagCooldownUntil = Date.now() + TAG_COOLDOWN_MS;
+        io.emit('holderChanged', holderID);
+        io.emit('tagCooldown', TAG_COOLDOWN_MS);
+      }
+    }
+  });
+
   socket.on('tagPlayer', (targetId) => {
     if (holderID !== socket.id) return;
     if (Date.now() < tagCooldownUntil) return;
@@ -332,7 +344,7 @@ io.on('connection', (socket) => {
     if (idx !== -1) {
       const m = activeMines.splice(idx, 1)[0];
       io.emit('mineTriggered', { id, pos: m });
-      io.emit('explosion', m);
+      io.emit('explosion', { x: m.x, y: m.y, z: m.z, type: 'mine' });
     }
   });
 
