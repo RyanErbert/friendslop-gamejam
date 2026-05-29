@@ -11,7 +11,7 @@ A simple 3D multiplayer web game where players move around, jump, and interact o
 - **Mobile support** — virtual joystick and jump button, tilt-friendly sphere player
 - **Name entry** — choose a name on join, displayed above your head
 - **Collisions** — AABB collision with platforming (jump on each other)
-- **Debug HUD** — press F3 for speed/position/FPS metrics, `[`/`]` to adjust camera distance
+- **Debug HUD** — press ` for speed/position/FPS metrics, `[`/`]` to adjust camera distance
 
 ## Tech Stack
 

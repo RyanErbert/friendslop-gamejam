@@ -3,6 +3,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
 const fs = require('fs');
+const readline = require('readline');
 
 const app = express();
 const server = http.createServer(app);
@@ -71,12 +72,38 @@ function randomSpawn() { const pts = getSpawnPoints(); return pts[Math.floor(Mat
 
 // --- Pedestal state ---
 const pedestals = [];
+const ITEMS_BY_CATEGORY = {
+  green: ['grapple', 'launch_pad', 'boost_pad', 'teleporter'],
+  red: ['machinegun', 'rocket', 'mines', 'timed_bomb'],
+  yellow: ['wall', 'ramp', 'platform']
+};
+
+setInterval(() => {
+  const now = Date.now();
+  let updated = false;
+  for (const ped of pedestals) {
+    if (!ped.currentItem && now >= (ped.spawnTime || 0)) {
+      const arr = ITEMS_BY_CATEGORY[ped.type] || ITEMS_BY_CATEGORY.green;
+      ped.currentItem = arr[Math.floor(Math.random() * arr.length)];
+      updated = true;
+    }
+  }
+  if (updated) {
+    io.emit('pedestalsUpdated', pedestals);
+  }
+}, 1000);
 
 // --- Oddball state ---
 let holderID = null;
 const scores = {};
 let tagCooldownUntil = 0;
 const TAG_COOLDOWN_MS = 4000;
+
+// --- World items state ---
+const activeTeleporters = [];
+const activeMines = [];
+const activeCoins = [];
+const activePads = [];
 
 function pickRandomHolder() {
   const ids = Object.keys(players);
@@ -100,6 +127,17 @@ setInterval(() => {
 const lastActivity = {};
 const INACTIVITY_LIMIT = 5 * 60 * 1000;
 
+// Clean up uncollected coins periodically
+setInterval(() => {
+  const now = Date.now();
+  for (let i = activeCoins.length - 1; i >= 0; i--) {
+    if (now - activeCoins[i].createdAt > 15000) {
+      io.emit('coinCollected', activeCoins[i].id); // fake collection to clean up visuals
+      activeCoins.splice(i, 1);
+    }
+  }
+}, 5000);
+
 setInterval(() => {
   const now = Date.now();
   for (const id of readyIds) {
@@ -113,13 +151,6 @@ setInterval(() => {
 }, 30000);
 
 io.on('connection', (socket) => {
-  const color = COLORS[colorIndex % COLORS.length];
-  colorIndex++;
-
-  const sp = randomSpawn();
-  players[socket.id] = { x: sp.x, y: sp.y, z: sp.z, color, type: 'box', name: 'Player', shape: 'box', skinColor: color, skinImage: '' };
-  scores[socket.id] = 0;
-
   socket.on('selectLevel', (level) => {
     if (typeof level === 'string' && level.endsWith('.glb')) {
       const othersReady = [...readyIds].filter(id => id !== socket.id).length;
@@ -130,22 +161,21 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('setType', (type) => {
-    if (type === 'ball' || type === 'box') players[socket.id].type = type;
-  });
-
-  socket.on('setName', (name) => {
-    if (typeof name === 'string') players[socket.id].name = name.slice(0, 16) || 'Player';
-  });
-
-  socket.on('setAppearance', (data) => {
-    if (!players[socket.id]) return;
-    if (data.shape) players[socket.id].shape = data.shape;
-    if (data.skinColor) players[socket.id].skinColor = data.skinColor;
-    if (typeof data.skinImage === 'string') players[socket.id].skinImage = data.skinImage.slice(0, 500);
-  });
-
-  socket.on('ready', () => {
+  socket.on('ready', (data = {}) => {
+    const sp = randomSpawn();
+    const color = data.skinColor || COLORS[colorIndex % COLORS.length];
+    if (!data.skinColor) colorIndex++;
+    
+    players[socket.id] = { 
+      x: sp.x, y: sp.y, z: sp.z, 
+      color, 
+      type: data.type === 'ball' ? 'ball' : (data.shape || 'box'), 
+      name: (typeof data.name === 'string' ? data.name.slice(0, 16) : 'Player') || 'Player', 
+      shape: data.shape || 'box', 
+      skinColor: color, 
+      skinImage: typeof data.skinImage === 'string' ? data.skinImage.slice(0, 500) : '' 
+    };
+    scores[socket.id] = 0;
     readyIds.add(socket.id);
     lastActivity[socket.id] = Date.now();
     console.log(`Player connected: ${socket.id} (${players[socket.id].name}, ${players[socket.id].shape})`);
@@ -153,6 +183,9 @@ io.on('connection', (socket) => {
     socket.emit('holderChanged', holderID);
     socket.emit('scores', scores);
     socket.emit('currentPedestals', pedestals);
+    socket.emit('currentTeleporters', activeTeleporters);
+    socket.emit('currentMines', activeMines);
+    socket.emit('currentPads', activePads);
     socket.broadcast.emit('newPlayer', { id: socket.id, ...players[socket.id] });
 
     // First player becomes holder
@@ -165,67 +198,241 @@ io.on('connection', (socket) => {
     players[socket.id].x = data.x;
     players[socket.id].y = data.y;
     players[socket.id].z = data.z;
-    players[socket.id].qx = data.qx || 0;
-    players[socket.id].qy = data.qy || 0;
-    players[socket.id].qz = data.qz || 0;
-    players[socket.id].qw = data.qw || 1;
-    players[socket.id].smoothing = data.smoothing;
-    players[socket.id].godmode = !!data.godmode;
-    socket.broadcast.emit('playerMoved', {
-      id: socket.id, x: data.x, y: data.y, z: data.z,
-      qx: data.qx, qy: data.qy, qz: data.qz, qw: data.qw,
-      smoothing: data.smoothing, godmode: !!data.godmode
-    });
-  });
-
-  socket.on('placePedestal', (data) => {
-    if (!players[socket.id]) return;
-    const ped = { x: data.x, y: data.y, z: data.z, id: Date.now() + '_' + socket.id };
-    pedestals.push(ped);
-    io.emit('pedestalPlaced', ped);
-    console.log(`PEDESTAL PLACED at (${ped.x.toFixed(2)}, ${ped.y.toFixed(2)}, ${ped.z.toFixed(2)}) by ${players[socket.id].name}`);
-  });
-
-  socket.on('removePedestal', (pedId) => {
-    const idx = pedestals.findIndex(p => p.id === pedId);
-    if (idx !== -1) {
-      pedestals.splice(idx, 1);
-      io.emit('pedestalRemoved', pedId);
+    if (data.qx !== undefined) {
+      players[socket.id].qx = data.qx;
+      players[socket.id].qy = data.qy;
+      players[socket.id].qz = data.qz;
+      players[socket.id].qw = data.qw;
     }
+    if (data.smoothing !== undefined) players[socket.id].smoothing = data.smoothing;
+    if (data.godmode !== undefined) players[socket.id].godmode = data.godmode;
+    socket.broadcast.emit('playerMoved', { id: socket.id, ...data });
   });
+
+  socket.on('jump', () => socket.broadcast.emit('playerJumped', socket.id));
+  socket.on('sprintStart', () => socket.broadcast.emit('playerSprintStart', socket.id));
 
   socket.on('tagPlayer', (targetId) => {
-    if (socket.id !== holderID) return;
+    if (holderID !== socket.id) return;
+    if (Date.now() < tagCooldownUntil) return;
     if (!players[targetId]) return;
-    const now = Date.now();
-    if (now < tagCooldownUntil) return;
     holderID = targetId;
-    tagCooldownUntil = now + TAG_COOLDOWN_MS;
+    tagCooldownUntil = Date.now() + TAG_COOLDOWN_MS;
     io.emit('holderChanged', holderID);
     io.emit('tagCooldown', TAG_COOLDOWN_MS);
   });
 
-  socket.on('jump', () => {
-    socket.broadcast.emit('playerJumped', socket.id);
+  socket.on('placePedestal', (pos) => {
+    const id = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
+    const ped = { ...pos, id, currentItem: null, spawnTime: 0 };
+    pedestals.push(ped);
+    io.emit('pedestalPlaced', ped);
   });
 
-  socket.on('sprintStart', () => {
-    socket.broadcast.emit('playerSprintStart', socket.id);
+  socket.on('placeTeleporter', (t) => {
+    activeTeleporters.push(t);
+    io.emit('teleporterPlaced', t);
+  });
+
+  socket.on('placePad', (pad) => {
+    const p = { ...pad, id: Date.now().toString(36) + Math.random().toString(36).substr(2) };
+    activePads.push(p);
+    io.emit('padPlaced', p);
+  });
+
+  socket.on('fireMachinegun', (data) => {
+    io.emit('machinegunFired', { ...data, owner: socket.id });
+  });
+
+  socket.on('machinegunHit', ({ targetId, dir }) => {
+    if (!players[targetId]) return;
+    if (scores[targetId] > 0) {
+      const pointsLost = Math.min(scores[targetId], 2);
+      scores[targetId] -= pointsLost;
+      const droppedCoins = [];
+      for (let i = 0; i < pointsLost; i++) {
+        const coin = {
+          id: Date.now().toString(36) + Math.random().toString(36).substr(2),
+          x: players[targetId].x, y: players[targetId].y + 1, z: players[targetId].z,
+          vx: dir.x * 20 + (Math.random() - 0.5) * 15, vy: Math.max(dir.y * 20, 8) + Math.random() * 10, vz: dir.z * 20 + (Math.random() - 0.5) * 15,
+          value: 1, createdAt: Date.now()
+        };
+        activeCoins.push(coin);
+        droppedCoins.push(coin);
+      }
+      io.emit('coinsDropped', droppedCoins);
+      io.emit('scores', scores);
+    }
+    io.emit('applyImpulse', { id: targetId, dir, force: 25 });
+  });
+
+  socket.on('fireRocket', (data) => {
+    io.emit('rocketFired', { ...data, owner: socket.id });
+  });
+
+  socket.on('triggerExplosion', (pos) => {
+    io.emit('explosion', pos);
+
+    const droppedCoins = [];
+    for (const [id, player] of Object.entries(players)) {
+      const dx = player.x - pos.x;
+      const dy = player.y - pos.y;
+      const dz = player.z - pos.z;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+      let pctLost = 0;
+      if (dist < 1) pctLost = 1.0;
+      else if (dist < 2) pctLost = 0.5;
+      else if (dist < 4) pctLost = 0.25;
+      else if (dist < 6) pctLost = 0.125;
+      else if (dist < 8) pctLost = 0.0625;
+
+      if (pctLost > 0 && scores[id] > 0) {
+        const pointsLost = Math.ceil(scores[id] * pctLost);
+        if (pointsLost > 0) {
+          scores[id] -= pointsLost;
+          const coinsToSpawn = Math.min(pointsLost, 15); // Cap visuals at 15
+          for (let i = 0; i < coinsToSpawn; i++) {
+            const coinId = Date.now().toString(36) + Math.random().toString(36).substr(2);
+            const coin = {
+              id: coinId,
+              x: player.x, y: player.y + 1, z: player.z,
+              vx: (dx / dist + (Math.random() - 0.5)) * 8,
+              vy: 8 + Math.random() * 6,
+              vz: (dz / dist + (Math.random() - 0.5)) * 8,
+              value: i === coinsToSpawn - 1 ? pointsLost - (coinsToSpawn - 1) : 1,
+              createdAt: Date.now()
+            };
+            activeCoins.push(coin);
+            droppedCoins.push(coin);
+          }
+        }
+      }
+    }
+    if (droppedCoins.length > 0) {
+      io.emit('coinsDropped', droppedCoins);
+      io.emit('scores', scores);
+    }
+  });
+
+  socket.on('placeMine', (pos) => {
+    const mine = { ...pos, id: Date.now().toString(36) + Math.random().toString(36).substr(2) };
+    activeMines.push(mine);
+    io.emit('minePlaced', mine);
+  });
+
+  socket.on('triggerMine', (id) => {
+    const idx = activeMines.findIndex(m => m.id === id);
+    if (idx !== -1) {
+      const m = activeMines.splice(idx, 1)[0];
+      io.emit('mineTriggered', { id, pos: m });
+      io.emit('explosion', m);
+    }
+  });
+
+  socket.on('pickupItem', (pedId) => {
+    const ped = pedestals.find(p => p.id === pedId);
+    if (ped && ped.currentItem) {
+      const item = ped.currentItem;
+      ped.currentItem = null;
+      let cd = 10000; // 10s default (green)
+      if (ped.type === 'red') cd = 20000; // 20s for weapons
+      else if (ped.type === 'yellow') cd = 15000; // 15s for environment
+      ped.spawnTime = Date.now() + cd;
+      socket.emit('itemPickedUp', item);
+      io.emit('pedestalsUpdated', pedestals);
+    }
+  });
+
+  socket.on('collectCoin', (coinId) => {
+    const idx = activeCoins.findIndex(c => c.id === coinId);
+    if (idx !== -1) {
+      const coin = activeCoins.splice(idx, 1)[0];
+      scores[socket.id] = (scores[socket.id] || 0) + coin.value;
+      io.emit('coinCollected', coinId);
+      io.emit('scores', scores);
+    }
+  });
+
+  socket.on('removePedestal', (id) => {
+    const idx = pedestals.findIndex(p => p.id === id);
+    if (idx !== -1) {
+      pedestals.splice(idx, 1);
+      io.emit('pedestalRemoved', id);
+    }
   });
 
   socket.on('disconnect', () => {
     console.log(`Player disconnected: ${socket.id}`);
-    readyIds.delete(socket.id);
     delete players[socket.id];
     delete scores[socket.id];
+    readyIds.delete(socket.id);
     delete lastActivity[socket.id];
     if (holderID === socket.id) pickRandomHolder();
     io.emit('playerDisconnected', socket.id);
-    io.emit('scores', scores);
   });
 });
 
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running at http://localhost:${PORT}`);
+server.listen(PORT, () => console.log(`Server running at http://localhost:${PORT}`));
+
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout
 });
+
+rl.on('line', (input) => {
+  const parts = input.trim().split(' ');
+  const cmd = parts[0];
+  const arg = parts.slice(1).join(' ');
+
+  if (cmd === 'kick' && arg) {
+    let targetId = players[arg] ? arg : Object.keys(players).find(id => players[id].name === arg);
+    if (targetId) {
+      const sock = io.sockets.sockets.get(targetId);
+      if (sock) {
+        sock.emit('kicked');
+        sock.disconnect(true);
+        console.log(`Kicked player: ${arg}`);
+      }
+    } else {
+      console.log(`Player not found: ${arg}`);
+    }
+  } else if (cmd === 'list') {
+    console.log(Object.keys(players).map(id => `${id}: ${players[id].name}`).join('\n') || 'No players connected');
+  } else if (cmd === 'spawn') {
+    const allItems = Object.values(ITEMS_BY_CATEGORY).flat();
+    const itemName = parts[1];
+    const playerNameOrId = parts.slice(2).join(' ');
+
+    if (!itemName) {
+      console.log('Usage: spawn <item> <player_name_or_id>');
+      console.log('Available items:\n  ' + allItems.join('\n  '));
+      return;
+    }
+
+    if (!allItems.includes(itemName)) {
+      console.log(`Invalid item: '${itemName}'. Type 'spawn' for a list.`);
+      return;
+    }
+
+    if (!playerNameOrId) {
+      console.log(`Please specify a player for item '${itemName}'.`);
+      return;
+    }
+
+    let targetId = playerNameOrId;
+    if (!players[targetId]) {
+      targetId = Object.keys(players).find(id => players[id].name === playerNameOrId);
+    }
+
+    const sock = targetId ? io.sockets.sockets.get(targetId) : null;
+    if (sock) {
+      sock.emit('itemPickedUp', itemName);
+      console.log(`Gave '${itemName}' to ${players[targetId].name}.`);
+    } else {
+      console.log(`Player not found: ${playerNameOrId}`);
+    }
+  }
+});
+  

@@ -290,6 +290,136 @@ let jumpCooldownTimer = 0;
 let jumpCooldownMax = 0;
 let jumpCooldownStartPct = 0;
 
+// --- Inventory state ---
+const MAX_INVENTORY = 3;
+const inventory = [];
+let isGrappling = false;
+let grappleTarget = null;
+let grappleLine = null;
+let pendingTeleporter = null;
+let pendingTeleporterMesh = null;
+const worldTeleporters = [];
+let lastTeleporterUsed = null;
+const activeBullets = [];
+const activeRockets = [];
+const worldMines = [];
+const activeCoinsList = [];
+const activeParticles = [];
+const worldPads = [];
+const trailGeo = new THREE.SphereGeometry(0.6, 6, 6);
+const trailMat = new THREE.MeshBasicMaterial({ color: 0xdddddd, transparent: true, opacity: 0.8 });
+
+// --- Inventory HUD ---
+const inventoryHud = document.createElement('div');
+inventoryHud.id = 'inventory-hud';
+inventoryHud.style.cssText = 'position:absolute;top:10px;left:10px;display:flex;align-items:flex-start;gap:10px;z-index:20;pointer-events:none;';
+document.body.appendChild(inventoryHud);
+
+function getColorForItem(item) {
+  if (['grapple', 'launch_pad', 'boost_pad', 'teleporter'].includes(item)) return '#44ff44';
+  if (['machinegun', 'rocket', 'mines', 'timed_bomb'].includes(item)) return '#ff4444';
+  if (['wall', 'ramp', 'platform'].includes(item)) return '#ffff44';
+  return '#ffffff';
+}
+
+function updateInventoryUI() {
+  inventoryHud.innerHTML = '';
+  if (!gameStarted) return;
+  inventory.forEach((item, index) => {
+    const isMain = index === 0;
+    const size = isMain ? 80 : 50;
+    const slot = document.createElement('div');
+    slot.style.cssText = `
+      width:${size}px; height:${size}px;
+      background:rgba(0,0,0,0.6);
+      border:2px solid ${getColorForItem(item)};
+      border-radius:8px;
+      display:flex; flex-direction:column; justify-content:center; align-items:center;
+      color:white; font:10px "04b_03",Lato,sans-serif; text-align:center; text-transform:uppercase;
+      transition: all 0.2s ease-in-out;
+      transform: none; opacity: 1;
+    `;
+    slot.innerHTML = `<div>${item.replace('_', ' ')}</div>`;
+    inventoryHud.appendChild(slot);
+  });
+}
+
+function consumeItem(targetPt) {
+  if (inventory.length === 0) return;
+  const item = inventory[0];
+
+  if (item === 'grapple') {
+    if (!targetPt) return; // Require a valid 3D target surface
+    isGrappling = true;
+    grappleTarget = new THREE.Vector3(targetPt.x, targetPt.y, targetPt.z);
+    playWorldSound(boostSound, localBody ? localBody.position : null, 0.8);
+  } else if (['launch_pad', 'boost_pad', 'mines'].includes(item)) {
+    if (!targetPt || !localPlayer || localPlayer.position.distanceTo(targetPt) > 10) return;
+    if (item === 'mines') socket.emit('placeMine', targetPt);
+    else {
+      const dir = new THREE.Vector3();
+      camera.getWorldDirection(dir);
+      dir.y = 0; dir.normalize();
+      socket.emit('placePad', { x: targetPt.x, y: targetPt.y, z: targetPt.z, type: item, dx: dir.x, dz: dir.z });
+    }
+  } else if (item === 'teleporter') {
+    if (!targetPt) return;
+    if (!pendingTeleporter) {
+      pendingTeleporter = targetPt;
+      const geo = new THREE.CylinderGeometry(0.8, 0.8, 0.2, 16);
+      const mat = new THREE.MeshStandardMaterial({ color: 0x44ff44, transparent: true, opacity: 0.5 });
+      pendingTeleporterMesh = new THREE.Mesh(geo, mat);
+      pendingTeleporterMesh.position.copy(targetPt);
+      scene.add(pendingTeleporterMesh);
+      return; // Early return to NOT consume the item on the first click
+    } else {
+      socket.emit('placeTeleporter', { a: pendingTeleporter, b: targetPt });
+      if (pendingTeleporterMesh) { scene.remove(pendingTeleporterMesh); pendingTeleporterMesh = null; }
+      pendingTeleporter = null;
+    }
+  } else if (item === 'rocket') {
+    if (!targetPt || !localBody) return;
+    const origin = new THREE.Vector3().copy(localBody.position).add(new THREE.Vector3(0, 1.0, 0));
+    const ray = new THREE.Raycaster();
+    const ndc = isMobile ? new THREE.Vector2(0,0) : lastMouseNDC;
+    ray.setFromCamera(ndc, camera);
+    const dirToTarget = ray.ray.direction.clone().normalize();
+    const start = origin.clone().addScaledVector(dirToTarget, 2.0);
+    const target = start.clone().addScaledVector(dirToTarget, 100);
+    const t = 100 / 60; // Flight time (60 units/sec)
+    const velocity = { x: (target.x - start.x) / t, y: ((target.y - start.y) - 0.5 * -20 * t * t) / t, z: (target.z - start.z) / t };
+    socket.emit('fireRocket', { start, velocity });
+  } else if (item === 'machinegun') {
+    if (!targetPt || !localBody) return;
+    let bullets = 6;
+    const mgInt = setInterval(() => {
+      if (!localBody) { clearInterval(mgInt); return; }
+      const origin = new THREE.Vector3().copy(localBody.position).add(new THREE.Vector3(0, 1.0, 0));
+      const noisyTarget = targetPt.clone().add(new THREE.Vector3((Math.random()-0.5)*3, (Math.random()-0.5)*3, (Math.random()-0.5)*3));
+      const dir = new THREE.Vector3().subVectors(noisyTarget, origin).normalize();
+      const start = origin.clone().addScaledVector(dir, 1.5);
+      socket.emit('fireMachinegun', { start, velocity: dir.multiplyScalar(200) });
+      bullets--;
+      if (bullets <= 0) clearInterval(mgInt);
+    }, 80);
+  }
+
+  inventory.shift();
+  console.log(`Consumed ${item} aimed at`, targetPt);
+
+  const firstSlot = inventoryHud.children[0];
+  if (firstSlot) {
+    firstSlot.style.transform = 'scale(0.5) translateX(-50px)';
+    firstSlot.style.opacity = '0';
+    for (let i = 1; i < inventoryHud.children.length; i++) {
+      inventoryHud.children[i].style.transform = 'translateX(-60px) scale(1.6)';
+    }
+    setTimeout(updateInventoryUI, 200);
+  } else {
+    updateInventoryUI();
+  }
+}
+
 // --- Sprint stamina state ---
 let sprintStamina = SPRINT_DURATION;
 let sprintExhausted = false;
@@ -384,6 +514,8 @@ function returnToMenu() {
   gameStarted = false;
   nameScreen.style.display = '';
   hud.style.display = 'none';
+  hud.style.opacity = '1';
+  hud.style.transition = '';
   leaderDisplay.style.display = 'none';
   scoreboardEl.style.display = 'none';
   debugEl.style.display = 'none';
@@ -410,6 +542,32 @@ function returnToMenu() {
   holderID = null;
   allScores = {};
   leaderID = null;
+  inventory.length = 0;
+  isGrappling = false;
+  if (grappleLine) grappleLine.visible = false;
+  if (pendingTeleporterMesh) { scene.remove(pendingTeleporterMesh); pendingTeleporterMesh = null; }
+  pendingTeleporter = null;
+  lastTeleporterUsed = null;
+
+  for (const m of worldMines) scene.remove(m.mesh);
+  worldMines.length = 0;
+
+  for (const c of activeCoinsList) {
+    scene.remove(c.mesh);
+    world.removeBody(c.body);
+  }
+  activeCoinsList.length = 0;
+
+  for (const p of activeParticles) scene.remove(p.mesh);
+  activeParticles.length = 0;
+
+  for (const b of activeBullets) scene.remove(b.mesh);
+  activeBullets.length = 0;
+
+  for (const p of worldPads) scene.remove(p.mesh);
+  worldPads.length = 0;
+
+  updateInventoryUI();
 
   if (document.pointerLockElement) document.exitPointerLock();
 
@@ -461,9 +619,11 @@ const godmodeMenu = document.createElement('div');
 godmodeMenu.id = 'godmode-menu';
 godmodeMenu.style.cssText = 'position:absolute;top:50px;left:10px;background:rgba(0,0,0,0.8);border:1px solid rgba(255,255,255,0.3);border-radius:8px;padding:10px;font:12px "04b_03",Lato,sans-serif;color:white;z-index:30;display:none;user-select:none;';
 godmodeMenu.innerHTML = `
-  <div style="margin-bottom:8px;color:#aaa;letter-spacing:1px;font-size:10px;">PLACE ITEM</div>
-  <div id="gm-tool-spawn" class="gm-tool selected" data-tool="spawn" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬦ Spawn Point</div>
-  <div id="gm-tool-pedestal" class="gm-tool" data-tool="pedestal" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Item Pedestal</div>
+  <div style="margin-bottom:8px;color:#aaa;letter-spacing:1px;font-size:10px;">PREFABS</div>
+  <div id="gm-tool-spawn" class="gm-tool selected" data-tool="spawn" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬦ Prefab: Player Spawn</div>
+  <div id="gm-tool-ped-green" class="gm-tool" data-tool="pedestal_green" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Prefab: Movement Item</div>
+  <div id="gm-tool-ped-red" class="gm-tool" data-tool="pedestal_red" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Prefab: Weapon Item</div>
+  <div id="gm-tool-ped-yellow" class="gm-tool" data-tool="pedestal_yellow" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Prefab: Build Item</div>
 `;
 document.body.appendChild(godmodeMenu);
 
@@ -491,7 +651,21 @@ function createPedestalAt(pt, pedId) {
   if (!pedestalTemplate) return null;
   const ped = pedestalTemplate.clone();
   ped.position.set(pt.x, pt.y, pt.z);
+  if (pt.ry !== undefined) ped.rotation.y = pt.ry;
   ped.userData.pedestalId = pedId;
+  ped.userData.type = pt.type || 'green';
+
+  const crystalGeo = new THREE.OctahedronGeometry(0.3, 0);
+  let color = 0x44ff44;
+  if (ped.userData.type === 'red') color = 0xff4444;
+  if (ped.userData.type === 'yellow') color = 0xffff44;
+  const crystalMat = new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.4 });
+  const crystal = new THREE.Mesh(crystalGeo, crystalMat);
+  crystal.position.y = 1.2;
+  crystal.userData.isCrystal = true;
+  crystal.visible = !!pt.currentItem;
+  ped.add(crystal);
+
   scene.add(ped);
   pedestalMeshes.push(ped);
   return ped;
@@ -508,6 +682,7 @@ const FLATNESS_THRESHOLD = 0.85;
 let ghostPreview = null;
 let ghostOutlineGroup = null;
 let ghostCanPlace = false;
+let ghostRotationY = 0;
 let hoveredExisting = null;
 const hoveredOriginalColors = new Map();
 
@@ -563,7 +738,7 @@ function getGhost() {
     if (!ghostSpawn) ghostSpawn = createGhostSpawn();
     if (ghostPedestal) ghostPedestal.visible = false;
     return ghostSpawn;
-  } else {
+  } else if (godmodeToolSelected.startsWith('pedestal')) {
     if (!ghostPedestal) ghostPedestal = createGhostPedestal();
     if (ghostSpawn) ghostSpawn.visible = false;
     return ghostPedestal;
@@ -572,10 +747,16 @@ function getGhost() {
 
 function setGhostColor(ghost, canPlace) {
   if (!ghost) return;
-  const col = canPlace ? 0x4488ff : 0xff3333;
+  let col = 0x4488ff;
+  if (!canPlace) col = 0xff3333;
+
   ghost.traverse((child) => {
     if (child.isMesh && child.material && child.material.color) {
-      child.material.color.setHex(col);
+      if (child.material.side === THREE.BackSide) {
+        child.material.color.setHex(canPlace ? 0x4488ff : 0xff3333);
+      } else {
+        child.material.color.setHex(col);
+      }
     }
   });
 }
@@ -638,7 +819,7 @@ function updateGodmodeHover(mouseX, mouseY) {
       if (ghost) ghost.visible = false;
       return;
     }
-  } else if (godmodeToolSelected === 'pedestal') {
+  } else if (godmodeToolSelected.startsWith('pedestal')) {
     const pedChildren = [];
     for (const ped of pedestalMeshes) ped.traverse(c => { if (c.isMesh) pedChildren.push(c); });
     const pedHits = hoverRaycaster.intersectObjects(pedChildren, false);
@@ -670,23 +851,35 @@ function updateGodmodeHover(mouseX, mouseY) {
     ghostCanPlace = true;
     if (ghost) {
       ghost.position.set(hit.point.x, hit.point.y + 1.5, hit.point.z);
+      ghost.rotation.y = ghostRotationY;
       ghost.visible = true;
       setGhostColor(ghost, true);
     }
-  } else if (godmodeToolSelected === 'pedestal') {
+  } else if (godmodeToolSelected.startsWith('pedestal')) {
     ghostCanPlace = flatness >= FLATNESS_THRESHOLD;
     if (ghost) {
       ghost.position.set(hit.point.x, hit.point.y, hit.point.z);
+      ghost.rotation.y = ghostRotationY;
       ghost.visible = true;
       setGhostColor(ghost, ghostCanPlace);
     }
   }
 }
 
+const playerGhostGeo = new THREE.CylinderGeometry(0.5, 0.5, 0.2, 16);
+const playerGhostMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.5 });
+const playerGhost = new THREE.Mesh(playerGhostGeo, playerGhostMat);
+playerGhost.visible = false;
+scene.add(playerGhost);
+
+let lastMouseNDC = new THREE.Vector2(0, 0);
+
 let lastHoverX = 0, lastHoverY = 0;
 renderer.domElement.addEventListener('mousemove', (e) => {
   lastHoverX = e.clientX;
   lastHoverY = e.clientY;
+  lastMouseNDC.x = (e.clientX / window.innerWidth) * 2 - 1;
+  lastMouseNDC.y = -(e.clientY / window.innerHeight) * 2 + 1;
   if (godmode) updateGodmodeHover(e.clientX, e.clientY);
 });
 
@@ -797,6 +990,17 @@ let gameStarted = false;
     cubeMat.color.set(playerColor);
   });
 
+  colorPicker.style.display = 'none';
+
+  cvs.style.cursor = 'pointer';
+  cvs.addEventListener('click', () => colorPicker.click());
+
+  const existingCustomizeBtn = Array.from(document.querySelectorAll('*')).find(el => el.childNodes.length === 1 && el.textContent.trim().toUpperCase() === 'CUSTOMIZE CHARACTER');
+  if (existingCustomizeBtn) {
+    existingCustomizeBtn.style.cursor = 'pointer';
+    existingCustomizeBtn.addEventListener('click', () => colorPicker.click());
+  }
+
   function animCube() {
     if (gameStarted) { pRenderer.dispose(); return; }
     requestAnimationFrame(animCube);
@@ -814,7 +1018,14 @@ function joinGame() {
   playerSkinImage = '';
   nameScreen.style.display = 'none';
   hud.style.display = '';
+  hud.style.opacity = '1';
+  hud.style.transition = 'opacity 1s ease-in-out';
   leaderDisplay.style.display = '';
+  updateInventoryUI();
+
+  setTimeout(() => {
+    if (gameStarted) hud.style.opacity = '0';
+  }, 10000);
 
   // Start music on first join
   if (!musicPlaying) {
@@ -1143,6 +1354,7 @@ if (isMobile) {
   // Touch-drag camera rotation (touches not on joystick or jump button)
   let camTouchId = null;
   let camTouchLastX = 0, camTouchLastY = 0;
+  let camTouchStartX = 0, camTouchStartY = 0, camTouchStartTime = 0;
   const CAM_TOUCH_SENSITIVITY = 0.005;
 
   renderer.domElement.addEventListener('touchstart', (e) => {
@@ -1151,6 +1363,9 @@ if (isMobile) {
     camTouchId = t.identifier;
     camTouchLastX = t.clientX;
     camTouchLastY = t.clientY;
+    camTouchStartX = t.clientX;
+    camTouchStartY = t.clientY;
+    camTouchStartTime = performance.now();
   });
   window.addEventListener('touchmove', (e) => {
     if (camTouchId === null) return;
@@ -1166,7 +1381,20 @@ if (isMobile) {
     lastMouseMoveTime = performance.now() / 1000;
   }, { passive: true });
   window.addEventListener('touchend', (e) => {
-    if (findTouch(e.changedTouches, camTouchId)) camTouchId = null;
+    const t = findTouch(e.changedTouches, camTouchId);
+    if (t) {
+      camTouchId = null;
+      const dist = Math.hypot(t.clientX - camTouchStartX, t.clientY - camTouchStartY);
+      if (dist < 10 && performance.now() - camTouchStartTime < 300) {
+        if (!godmode && inventory.length > 0) {
+          const consumeRay = new THREE.Raycaster();
+          const ndc = new THREE.Vector2((t.clientX / window.innerWidth) * 2 - 1, -(t.clientY / window.innerHeight) * 2 + 1);
+          consumeRay.setFromCamera(ndc, camera);
+          const hits = consumeRay.intersectObjects(levelMeshes, false);
+          consumeItem(hits.length > 0 ? hits[0].point : null);
+        }
+      }
+    }
   });
 } else {
   window.addEventListener('keydown', (e) => {
@@ -1471,9 +1699,26 @@ function handleMovement(delta) {
   // Always apply gradual speed cap
   const vx = localBody.velocity.x, vz = localBody.velocity.z;
   const hSpeed = Math.sqrt(vx * vx + vz * vz);
-  if (hSpeed > speedCapCurrent) {
+  if (!isGrappling && hSpeed > speedCapCurrent) {
     localBody.velocity.x = (vx / hSpeed) * speedCapCurrent;
     localBody.velocity.z = (vz / hSpeed) * speedCapCurrent;
+  }
+
+  // Grapple logic
+  if (isGrappling && localBody) {
+    const currentPos = new THREE.Vector3(localBody.position.x, localBody.position.y, localBody.position.z);
+    const dir = new THREE.Vector3().subVectors(grappleTarget, currentPos);
+    const dist = dir.length();
+
+    if (dist < 2 || keys['Space'] || jumpBufferTimer > 0) {
+      isGrappling = false;
+    } else {
+      dir.normalize();
+      const GRAPPLE_SPEED = 40;
+      localBody.velocity.x = dir.x * GRAPPLE_SPEED;
+      localBody.velocity.y = dir.y * GRAPPLE_SPEED;
+      localBody.velocity.z = dir.z * GRAPPLE_SPEED;
+    }
   }
 
   // Jump cooldown tick
@@ -1599,9 +1844,15 @@ document.addEventListener('mousemove', (e) => {
 });
 
 window.addEventListener('wheel', (e) => {
-  if (!gameStarted || godmode) return;
-  BASE_CHAIN_LENGTH += e.deltaY * 0.005;
-  BASE_CHAIN_LENGTH = Math.max(2, Math.min(20, BASE_CHAIN_LENGTH));
+  if (!gameStarted) return;
+  if (godmode) {
+    ghostRotationY += (e.deltaY > 0 ? 1 : -1) * (Math.PI / 8);
+    const ghost = getGhost();
+    if (ghost) ghost.rotation.y = ghostRotationY;
+  } else {
+    BASE_CHAIN_LENGTH += e.deltaY * 0.005;
+    BASE_CHAIN_LENGTH = Math.max(2, Math.min(20, BASE_CHAIN_LENGTH));
+  }
 }, { passive: true });
 
 // --- Spawn point editor ---
@@ -1634,7 +1885,16 @@ function hideSpawnMarkers() {
 }
 
 renderer.domElement.addEventListener('click', (e) => {
-  if (!godmode) return;
+  if (!godmode) {
+    if (inventory.length > 0) {
+      const consumeRay = new THREE.Raycaster();
+      const ndc = new THREE.Vector2((e.clientX / window.innerWidth) * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1);
+      consumeRay.setFromCamera(ndc, camera);
+      const hits = consumeRay.intersectObjects(levelMeshes, false);
+      consumeItem(hits.length > 0 ? hits[0].point : null);
+    }
+    return;
+  }
 
   const now = performance.now() / 1000;
 
@@ -1668,7 +1928,7 @@ renderer.domElement.addEventListener('click', (e) => {
     createSpawnMarker(newSp);
     console.log(`SPAWN POINT ADDED: { x: ${newSp.x}, y: ${newSp.y}, z: ${newSp.z} } — ${SPAWN_POINTS.length} total`);
 
-  } else if (godmodeToolSelected === 'pedestal') {
+  } else if (godmodeToolSelected.startsWith('pedestal')) {
     // Check if clicking on an existing pedestal to remove it
     const pedChildren = [];
     for (const ped of pedestalMeshes) ped.traverse(c => { if (c.isMesh) pedChildren.push(c); });
@@ -1690,7 +1950,8 @@ renderer.domElement.addEventListener('click', (e) => {
     const hits = spawnClickRaycaster.intersectObjects(levelMeshes, false);
     if (hits.length === 0) return;
     const pt = hits[0].point;
-    const pos = { x: parseFloat(pt.x.toFixed(2)), y: parseFloat(pt.y.toFixed(2)), z: parseFloat(pt.z.toFixed(2)) };
+    const type = godmodeToolSelected.replace('pedestal_', '');
+    const pos = { x: parseFloat(pt.x.toFixed(2)), y: parseFloat(pt.y.toFixed(2)), z: parseFloat(pt.z.toFixed(2)), ry: parseFloat(ghostRotationY.toFixed(2)), type };
     socket.emit('placePedestal', pos);
     console.log(`PEDESTAL PLACED: { x: ${pos.x}, y: ${pos.y}, z: ${pos.z} }`);
   }
@@ -1782,14 +2043,16 @@ function updateOddballVisuals() {
     crown.visible = (id === leaderID);
   }
 
-  // Update score sprites — only leader shows score above head
+  // Update score sprites — show for anyone with > 0 points
   if (localScoreSprite) {
-    localScoreSprite.visible = (leaderID === selfId);
-    if (leaderID === selfId) updateScoreSpriteText(localScoreSprite, allScores[selfId] || 0);
+    const score = allScores[selfId] || 0;
+    localScoreSprite.visible = score > 0;
+    if (score > 0) updateScoreSpriteText(localScoreSprite, score);
   }
   for (const [id, ss] of playerScoreSprites) {
-    ss.visible = (id === leaderID);
-    if (id === leaderID) updateScoreSpriteText(ss, allScores[id] || 0);
+    const score = allScores[id] || 0;
+    ss.visible = score > 0;
+    if (score > 0) updateScoreSpriteText(ss, score);
   }
 
   // Update leader display
@@ -1868,10 +2131,14 @@ function scaleLeaderSprites(playerPos, nameSprite, scoreSprite, crown) {
   }
 }
 
-function resetLabelScale(nameSprite) {
+function resetLabelScale(nameSprite, scoreSprite) {
   if (nameSprite) {
     nameSprite.scale.set(2, 0.5, 1);
     nameSprite.position.y = BASE_NAME_Y;
+  }
+  if (scoreSprite && scoreSprite.visible) {
+    scoreSprite.scale.set(1.5, 0.4, 1);
+    scoreSprite.position.y = BASE_NAME_Y + 0.45;
   }
 }
 
@@ -1882,7 +2149,7 @@ function updateCrowns() {
     if (leaderID === selfId) {
       scaleLeaderSprites(localPlayer.position, nameLabel, localScoreSprite, localCrown);
     } else {
-      resetLabelScale(nameLabel);
+          resetLabelScale(nameLabel, localScoreSprite);
     }
   }
   for (const [id, group] of remotePlayers) {
@@ -1892,7 +2159,7 @@ function updateCrowns() {
     if (id === leaderID) {
       scaleLeaderSprites(group.position, nameLabel, ss, crown);
     } else {
-      resetLabelScale(nameLabel);
+          resetLabelScale(nameLabel, ss);
     }
   }
 }
@@ -1901,10 +2168,13 @@ function updateCrowns() {
 const socket = io();
 
 function startGame() {
-  socket.emit('setType', isMobile ? 'ball' : playerShape);
-  socket.emit('setName', playerName);
-  socket.emit('setAppearance', { shape: playerShape, skinColor: playerColor, skinImage: playerSkinImage });
-  socket.emit('ready');
+  socket.emit('ready', {
+    type: isMobile ? 'ball' : playerShape,
+    name: playerName,
+    shape: playerShape,
+    skinColor: playerColor,
+    skinImage: playerSkinImage
+  });
 }
 
 socket.on('currentPlayers', (data) => {
@@ -2007,6 +2277,8 @@ socket.on('kicked', () => {
 });
 
 socket.on('currentPedestals', (peds) => {
+  for (const ped of pedestalMeshes) scene.remove(ped);
+  pedestalMeshes.length = 0;
   for (const ped of peds) createPedestalAt(ped, ped.id);
 });
 
@@ -2020,6 +2292,177 @@ socket.on('pedestalRemoved', (pedId) => {
     scene.remove(pedestalMeshes[idx]);
     pedestalMeshes.splice(idx, 1);
   }
+});
+
+socket.on('pedestalsUpdated', (peds) => {
+  for (const p of peds) {
+    const mesh = pedestalMeshes.find(m => m.userData.pedestalId === p.id);
+    if (mesh) {
+      const crystal = mesh.children.find(c => c.userData.isCrystal);
+      if (crystal) crystal.visible = !!p.currentItem;
+    }
+  }
+});
+
+socket.on('itemPickedUp', (item) => {
+  if (inventory.length < MAX_INVENTORY) {
+    inventory.push(item);
+    console.log(`Picked up ${item}! Inventory:`, inventory);
+    updateInventoryUI();
+  }
+});
+
+function addTeleporterToWorld(t) {
+  const geo = new THREE.CylinderGeometry(0.8, 0.8, 0.2, 16);
+  const mat = new THREE.MeshStandardMaterial({ color: 0x44ff44, emissive: 0x228822 });
+  const meshA = new THREE.Mesh(geo, mat.clone());
+  const meshB = new THREE.Mesh(geo, mat.clone());
+  const posA = new THREE.Vector3(t.a.x, t.a.y, t.a.z);
+  const posB = new THREE.Vector3(t.b.x, t.b.y, t.b.z);
+  meshA.position.copy(posA);
+  meshB.position.copy(posB);
+  scene.add(meshA);
+  scene.add(meshB);
+  worldTeleporters.push({ a: posA, b: posB, meshA, meshB });
+}
+
+socket.on('currentTeleporters', (ts) => {
+  for (const wt of worldTeleporters) { scene.remove(wt.meshA); scene.remove(wt.meshB); }
+  worldTeleporters.length = 0;
+  for (const t of ts) addTeleporterToWorld(t);
+});
+
+socket.on('teleporterPlaced', (t) => addTeleporterToWorld(t));
+
+function addPadToWorld(p) {
+  const geo = new THREE.BoxGeometry(1.2, 0.1, 1.2);
+  const mat = new THREE.MeshStandardMaterial({ color: 0x44ff44, emissive: 0x114411 });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(p.x, p.y + 0.05, p.z);
+  if (p.type === 'boost_pad') {
+    const dirBox = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.15, 0.8), new THREE.MeshBasicMaterial({color: 0xffffff}));
+    dirBox.position.set(0, 0, 0);
+    mesh.rotation.y = Math.atan2(p.dx, p.dz);
+    mesh.add(dirBox);
+  } else {
+    const upBox = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.15, 0.6), new THREE.MeshBasicMaterial({color: 0xffffff}));
+    mesh.add(upBox);
+  }
+  scene.add(mesh);
+  worldPads.push({ ...p, mesh, pos: new THREE.Vector3(p.x, p.y, p.z) });
+}
+socket.on('currentPads', (ps) => { for (const p of worldPads) scene.remove(p.mesh); worldPads.length = 0; for (const p of ps) addPadToWorld(p); });
+socket.on('padPlaced', (p) => addPadToWorld(p));
+
+socket.on('machinegunFired', (data) => {
+  const geo = new THREE.CylinderGeometry(0.05, 0.05, 2.0, 4);
+  geo.rotateX(Math.PI / 2);
+  const mat = new THREE.MeshBasicMaterial({ color: 0xffff00 });
+  const mesh = new THREE.Mesh(geo, mat);
+  const start = new THREE.Vector3(data.start.x, data.start.y, data.start.z);
+  const velocity = new THREE.Vector3(data.velocity.x, data.velocity.y, data.velocity.z);
+  mesh.position.copy(start);
+  mesh.lookAt(new THREE.Vector3().copy(start).add(velocity));
+  scene.add(mesh);
+  activeBullets.push({ mesh, pos: start, velocity, life: 2, owner: data.owner });
+  playWorldSound(boostSound, start, 0.2);
+});
+
+socket.on('applyImpulse', (data) => {
+  if (data.id === selfId && localBody) {
+    localBody.wakeUp();
+    localBody.velocity.x += data.dir.x * data.force;
+    localBody.velocity.y += data.dir.y * data.force;
+    localBody.velocity.z += data.dir.z * data.force;
+    speedCapCurrent = Math.max(speedCapCurrent, Math.sqrt(localBody.velocity.x**2 + localBody.velocity.z**2));
+  }
+});
+
+socket.on('rocketFired', (data) => {
+  const geo = new THREE.CylinderGeometry(0.1, 0.1, 0.6, 8);
+  geo.rotateX(Math.PI / 2);
+  const mat = new THREE.MeshStandardMaterial({ color: 0xff2222, emissive: 0x550000 });
+  const mesh = new THREE.Mesh(geo, mat);
+  const start = new THREE.Vector3(data.start.x, data.start.y, data.start.z);
+  const velocity = new THREE.Vector3(data.velocity.x, data.velocity.y, data.velocity.z);
+  mesh.position.copy(start);
+  mesh.lookAt(new THREE.Vector3().copy(start).add(velocity));
+  activeRockets.push({ mesh, pos: start, velocity, life: 5, owner: data.owner });
+  playWorldSound(boostSound, start, 1.0);
+});
+
+socket.on('explosion', (pos) => {
+  const p = new THREE.Vector3(pos.x, pos.y, pos.z);
+  const geo = new THREE.SphereGeometry(2, 16, 16);
+  const mat = new THREE.MeshBasicMaterial({ color: 0xff6600, transparent: true, opacity: 1.0 });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.copy(p);
+  scene.add(mesh);
+  playWorldSound(boostSound, p, 2.0); // Reuse boost sound for now
+
+  if (localPlayer && localBody) {
+    const dist = localPlayer.position.distanceTo(p);
+    if (dist < 8) {
+      const dir = new THREE.Vector3().subVectors(localPlayer.position, p).normalize();
+      dir.y += 1.5; dir.normalize(); // Angle knockback upwards
+      const force = (8 - dist) * 20;
+      localBody.wakeUp(); // Ensure physics engine registers the hit
+      localBody.velocity.x += dir.x * force;
+      localBody.velocity.y += dir.y * force;
+      localBody.velocity.z += dir.z * force;
+      const hSpeedAfter = Math.sqrt(localBody.velocity.x ** 2 + localBody.velocity.z ** 2);
+      speedCapCurrent = Math.max(speedCapCurrent, hSpeedAfter);
+    }
+  }
+
+  let scale = 1;
+  const anim = setInterval(() => {
+    scale += 0.2;
+    mesh.scale.set(scale, scale, scale);
+    mesh.material.opacity -= 0.05;
+    if (mesh.material.opacity <= 0) { clearInterval(anim); scene.remove(mesh); }
+  }, 30);
+});
+
+function addMineToWorld(m) {
+  const geo = new THREE.CylinderGeometry(0.4, 0.4, 0.1, 12);
+  const mat = new THREE.MeshStandardMaterial({ color: 0xff2222, emissive: 0x440000 });
+  const mesh = new THREE.Mesh(geo, mat);
+  const pos = new THREE.Vector3(m.x, m.y, m.z);
+  mesh.position.copy(pos);
+  scene.add(mesh);
+  worldMines.push({ id: m.id, mesh, pos });
+}
+socket.on('currentMines', (ms) => { for (const m of worldMines) scene.remove(m.mesh); worldMines.length = 0; for (const m of ms) addMineToWorld(m); });
+socket.on('minePlaced', (m) => addMineToWorld(m));
+socket.on('mineTriggered', (data) => { const idx = worldMines.findIndex(m => m.id === data.id); if (idx !== -1) { scene.remove(worldMines[idx].mesh); worldMines.splice(idx, 1); } });
+
+socket.on('coinsDropped', (coins) => {
+  for (const c of coins) {
+    const body = new CANNON.Body({
+      mass: 1,
+      shape: new CANNON.Cylinder(0.3, 0.3, 0.1, 8),
+      material: playerMaterial,
+      linearDamping: 0.1, angularDamping: 0.1
+    });
+    body.position.set(c.x, c.y, c.z);
+    body.velocity.set(c.vx, c.vy, c.vz);
+    const q = new CANNON.Quaternion();
+    q.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), Math.PI / 2);
+    body.quaternion = q;
+    world.addBody(body);
+    const geo = new THREE.CylinderGeometry(0.3, 0.3, 0.1, 16);
+    geo.rotateX(Math.PI / 2);
+    const mat = new THREE.MeshStandardMaterial({ color: 0xffd700, emissive: 0xaa8800 });
+    const mesh = new THREE.Mesh(geo, mat);
+    scene.add(mesh);
+    activeCoinsList.push({ id: c.id, body, mesh, collectTimer: 1.0 }); // Can't be collected for 1 second
+  }
+});
+
+socket.on('coinCollected', (id) => {
+  const idx = activeCoinsList.findIndex(c => c.id === id);
+  if (idx !== -1) { const c = activeCoinsList.splice(idx, 1)[0]; scene.remove(c.mesh); world.removeBody(c.body); playWorldSound(boostSound, c.mesh.position, 0.6); }
 });
 
 function sendPosition() {
@@ -2067,11 +2510,11 @@ function handleGodmode(delta) {
 let debugVisible = false;
 const debugEl = document.createElement('div');
 debugEl.id = 'debug-hud';
-debugEl.style.cssText = 'position:absolute;top:10px;right:10px;color:#0f0;font:12px 04b_03, Lato, sans-serif;background:rgba(0,0,0,0.6);padding:8px 12px;border-radius:4px;white-space:pre;display:none;pointer-events:none;';
+debugEl.style.cssText = 'position:absolute;top:10px;right:10px;color:white;font:12px "04b_03",Lato,sans-serif;background:rgba(0,0,0,0.8);border:1px solid rgba(255,255,255,0.3);padding:10px;border-radius:8px;white-space:pre;display:none;pointer-events:none;z-index:30;';
 document.body.appendChild(debugEl);
 
 window.addEventListener('keydown', (e) => {
-  if (e.code === 'F3') {
+  if (e.code === 'Backquote') {
     e.preventDefault();
     debugVisible = !debugVisible;
     debugEl.style.display = debugVisible ? '' : 'none';
@@ -2245,19 +2688,172 @@ function animate() {
       if (levelLoaded) world.step(PHYSICS_STEP, delta, 3);
       resolveWallCollisions(localBody);
       syncMeshToBody(localPlayer, localMesh, localBody);
+    }
 
-      if (checkGrounded()) {
-        airTime = 0;
+    if (isGrappling && localPlayer) {
+      if (!grappleLine) {
+        const mat = new THREE.LineBasicMaterial({ color: 0x44ff44, linewidth: 2 });
+        const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+        grappleLine = new THREE.Line(geo, mat);
+        scene.add(grappleLine);
+      }
+      grappleLine.visible = true;
+      grappleLine.geometry.setFromPoints([localPlayer.position, grappleTarget]);
+    } else if (grappleLine) {
+      grappleLine.visible = false;
+    }
+
+    // Player item ghosting
+    if (!godmode && inventory.length > 0 && localPlayer) {
+      const item = inventory[0];
+      if (['mines', 'launch_pad', 'boost_pad'].includes(item)) {
+        hoverRaycaster.setFromCamera(lastMouseNDC, camera);
+        const hits = hoverRaycaster.intersectObjects(levelMeshes, false);
+        if (hits.length > 0) {
+          const pt = hits[0].point;
+          const dist = localPlayer.position.distanceTo(pt);
+          playerGhost.position.set(pt.x, pt.y + 0.1, pt.z);
+          playerGhost.visible = true;
+          playerGhost.material.color.setHex(dist <= 10 ? 0x4488ff : 0xff3333);
+        } else playerGhost.visible = false;
+      } else playerGhost.visible = false;
+    } else if (playerGhost && playerGhost.visible) playerGhost.visible = false;
+
+    // Teleport logic
+    let onTeleporter = false;
+    if (localPlayer && localBody) {
+      for (const wt of worldTeleporters) {
+        const distA = localPlayer.position.distanceTo(wt.a);
+        const distB = localPlayer.position.distanceTo(wt.b);
+        if (distA < 1.5 || distB < 1.5) {
+          onTeleporter = true;
+          if (lastTeleporterUsed !== wt) {
+            if (distA < 1.5) {
+              localBody.position.set(wt.b.x, wt.b.y + 1.5, wt.b.z);
+              playWorldSound(boostSound, wt.b, 1.0);
+            } else {
+              localBody.position.set(wt.a.x, wt.a.y + 1.5, wt.a.z);
+              playWorldSound(boostSound, wt.a, 1.0);
+            }
+            lastTeleporterUsed = wt;
+          }
+        }
+      }
+    }
+    if (!onTeleporter) lastTeleporterUsed = null;
+
+    // Machine gun bullets
+    for (let i = activeBullets.length - 1; i >= 0; i--) {
+      const b = activeBullets[i];
+      b.life -= delta;
+      b.pos.addScaledVector(b.velocity, delta);
+      b.mesh.position.copy(b.pos);
+
+      let hit = false;
+      const moveDist = b.velocity.length() * delta;
+      if (b.pos.y < 0 || raycastLevel(b.pos, b.velocity.clone().normalize(), moveDist + 0.1)) hit = true;
+
+      if (!hit && b.owner === selfId) {
+        for (const [id, group] of remotePlayers) {
+          if (group.position.distanceTo(b.pos) < 1.5) { hit = true; socket.emit('machinegunHit', { targetId: id, dir: b.velocity.clone().normalize() }); break; }
+        }
+      }
+      if (!hit && b.owner !== selfId && localPlayer && localPlayer.position.distanceTo(b.pos) < 1.5) hit = true;
+
+      if (hit || b.life <= 0) { scene.remove(b.mesh); activeBullets.splice(i, 1); }
+    }
+
+    // Rockets
+    for (let i = activeRockets.length - 1; i >= 0; i--) {
+      const r = activeRockets[i];
+      r.life -= delta;
+      r.velocity.y += -20 * delta; // Gravity
+      r.pos.addScaledVector(r.velocity, delta);
+      r.mesh.position.copy(r.pos);
+      r.mesh.lookAt(new THREE.Vector3().copy(r.pos).add(r.velocity));
+
+      if (Math.random() < 0.6) {
+        const pMesh = new THREE.Mesh(trailGeo, trailMat.clone());
+        pMesh.position.copy(r.pos);
+        scene.add(pMesh);
+        activeParticles.push({ mesh: pMesh, life: 0.4, maxLife: 0.4 });
+      }
+
+      const moveDist = r.velocity.length() * delta;
+      let hit = false;
+      if (r.pos.y < 0 || raycastLevel(r.pos, r.velocity.clone().normalize(), moveDist + 0.2)) hit = true;
+      for (const [id, group] of remotePlayers) if (id !== r.owner && group.position.distanceTo(r.pos) < 1.2) hit = true;
+      if (selfId !== r.owner && localPlayer && localPlayer.position.distanceTo(r.pos) < 1.2) hit = true;
+
+      if (hit || r.life <= 0) {
+        if (hit && r.owner === selfId) socket.emit('triggerExplosion', { x: r.pos.x, y: r.pos.y, z: r.pos.z });
+        scene.remove(r.mesh);
+        activeRockets.splice(i, 1);
+      }
+    }
+
+    // Update particles
+    for (let i = activeParticles.length - 1; i >= 0; i--) {
+      const p = activeParticles[i];
+      p.life -= delta;
+      if (p.life <= 0) {
+        scene.remove(p.mesh);
+        if (p.mesh.material) p.mesh.material.dispose();
+        activeParticles.splice(i, 1);
       } else {
-        airTime += delta;
+        const pct = p.life / p.maxLife;
+        p.mesh.scale.setScalar(1 + (1 - pct) * 1.5);
+        p.mesh.material.opacity = pct * 0.8;
       }
-      if (airTime > 5) {
-        const rsp = randomSpawn();
-        localBody.position.set(rsp.x, rsp.y, rsp.z);
-        localBody.velocity.set(0, 0, 0);
-        localBody.angularVelocity.set(0, 0, 0);
-        airTime = 0;
+    }
+
+    // Mines
+    if (localPlayer) {
+      for (const m of worldMines) if (localPlayer.position.distanceTo(m.pos) < 1.2) socket.emit('triggerMine', m.id);
+    }
+
+    // Update coins
+    for (const c of activeCoinsList) {
+      c.mesh.position.copy(c.body.position);
+      c.mesh.quaternion.copy(c.body.quaternion);
+      if (c.collectTimer > 0) c.collectTimer -= delta;
+      if (c.collectTimer <= 0 && localPlayer) {
+        if (localPlayer.position.distanceTo(c.mesh.position) < 1.5) {
+          c.collectTimer = 999;
+          socket.emit('collectCoin', c.id);
+        }
       }
+    }
+
+    for (const ped of pedestalMeshes) {
+      const crystal = ped.children.find(c => c.userData.isCrystal);
+      if (crystal && crystal.visible) {
+        crystal.rotation.y += delta * 2;
+        crystal.position.y = 1.2 + Math.sin(Date.now() * 0.003 + ped.position.x) * 0.1;
+
+        if (!godmode && localBody && inventory.length < MAX_INVENTORY) {
+          const dx = localBody.position.x - ped.position.x;
+          const dy = localBody.position.y - ped.position.y;
+          const dz = localBody.position.z - ped.position.z;
+          if (Math.sqrt(dx * dx + dy * dy + dz * dz) < 1.8) {
+            crystal.visible = false; // Optimistically hide it
+            socket.emit('pickupItem', ped.userData.pedestalId);
+          }
+        }
+      }
+    }
+
+    if (checkGrounded()) {
+      airTime = 0;
+    } else {
+      airTime += delta;
+    }
+    if (airTime > 5) {
+      const rsp = randomSpawn();
+      localBody.position.set(rsp.x, rsp.y, rsp.z);
+      localBody.velocity.set(0, 0, 0);
+      localBody.angularVelocity.set(0, 0, 0);
+      airTime = 0;
     }
 
     for (const [id, target] of remoteTargets) {
@@ -2302,6 +2898,26 @@ function animate() {
               child.material.opacity = isGhost ? 0.3 : 1.0;
               child.material.transparent = true;
             }
+          }
+        }
+      }
+    }
+
+    // Pads
+    if (localPlayer && localBody) {
+      for (const p of worldPads) {
+        if (localPlayer.position.distanceTo(p.pos) < 1.5) {
+          if (p.type === 'launch_pad' && localBody.velocity.y < JUMP_IMPULSE * 2) {
+             localBody.velocity.y = JUMP_IMPULSE * 4;
+             playRandomJumpSound(localBody.position);
+          } else if (p.type === 'boost_pad') {
+             const hSpeed = Math.sqrt(localBody.velocity.x**2 + localBody.velocity.z**2);
+             if (hSpeed < SPRINT_SPEED * 1.5) {
+                 const boostForce = SPRINT_SPEED * 2.5;
+                 localBody.velocity.set(p.dx * boostForce, 5, p.dz * boostForce);
+                 speedCapCurrent = Math.max(speedCapCurrent, boostForce);
+                 playWorldSound(boostSound, localBody.position, 1.0);
+             }
           }
         }
       }
