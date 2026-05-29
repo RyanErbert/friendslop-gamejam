@@ -3,8 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>3D Game</title>
+  <title>Cube Fight!</title>
   <style>
+    @font-face {
+      font-family: '04b_03';
+      src: url('/fonts/04B_03__.TTF') format('truetype');
+      font-display: swap;
+    }
+    @import url('https://fonts.googleapis.com/css2?family=Lato:wght@400;700&display=swap');
     * { margin: 0; padding: 0; }
     body { overflow: hidden; }
     canvas { display: block; }
@@ -17,16 +23,16 @@
       align-items: center;
       justify-content: center;
       z-index: 10;
-      font-family: monospace;
+      font-family: '04b_03', Lato, LatoExtended, sans-serif;
       color: white;
       gap: 12px;
     }
-    #name-screen h1 { font-size: 28px; margin-bottom: 8px; }
+    #title-canvas { image-rendering: pixelated; margin-bottom: 4px; }
     #name-screen label { font-size: 13px; color: #aaa; }
-    #name-input, #skin-image-input {
+    #name-input {
       font-size: 18px;
       padding: 6px 14px;
-      font-family: monospace;
+      font-family: '04b_03', Lato, LatoExtended, sans-serif;
       text-align: center;
       border: 2px solid #fff;
       background: rgba(255,255,255,0.1);
@@ -36,8 +42,7 @@
       max-width: 200px;
       width: 200px;
     }
-    #skin-image-input { font-size: 12px; }
-    #name-input::placeholder, #skin-image-input::placeholder { color: rgba(255,255,255,0.4); }
+    #name-input::placeholder { color: rgba(255,255,255,0.4); }
     .option-row {
       display: flex;
       gap: 10px;
@@ -50,7 +55,7 @@
       border-radius: 8px;
       background: rgba(255,255,255,0.08);
       color: white;
-      font-family: monospace;
+      font-family: '04b_03', Lato, LatoExtended, sans-serif;
       font-size: 10px;
       cursor: pointer;
       display: flex;
@@ -69,7 +74,7 @@
       margin-top: 8px;
       padding: 10px 32px;
       font-size: 18px;
-      font-family: monospace;
+      font-family: '04b_03', Lato, LatoExtended, sans-serif;
       font-weight: bold;
       background: #4488ff;
       color: white;
@@ -83,7 +88,7 @@
       top: 10px;
       left: 10px;
       color: white;
-      font-family: monospace;
+      font-family: '04b_03', Lato, LatoExtended, sans-serif;
       font-size: 14px;
       text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
     }
@@ -93,7 +98,7 @@
       left: 50%;
       transform: translateX(-50%);
       color: white;
-      font-family: monospace;
+      font-family: '04b_03', Lato, LatoExtended, sans-serif;
       font-size: 18px;
       font-weight: bold;
       text-shadow: 1px 1px 3px rgba(0,0,0,0.9);
@@ -127,7 +132,7 @@
       background: rgba(255,255,255,0.3);
       border: 3px solid rgba(255,255,255,0.6);
       color: white;
-      font-family: monospace;
+      font-family: '04b_03', Lato, LatoExtended, sans-serif;
       font-size: 16px; font-weight: bold;
       display: flex; align-items: center; justify-content: center;
       user-select: none; -webkit-user-select: none;
@@ -146,7 +151,7 @@
       border: 2px solid rgba(255,255,255,0.3);
       border-radius: 10px;
       padding: 16px 24px;
-      font-family: monospace;
+      font-family: '04b_03', Lato, LatoExtended, sans-serif;
       color: white;
       z-index: 20;
       display: none;
@@ -242,7 +247,7 @@
       position: absolute;
       top: -18px;
       left: 0;
-      font-family: monospace;
+      font-family: '04b_03', Lato, LatoExtended, sans-serif;
       font-size: 12px;
       color: rgba(255,255,255,0.8);
       pointer-events: none;
@@ -252,16 +257,17 @@
 </head>
 <body>
   <div id="name-screen">
-    <h1>JOIN GAME</h1>
+    <canvas id="title-canvas" width="200" height="40" style="width:800px;height:160px;image-rendering:pixelated;"></canvas>
     <input id="name-input" type="text" placeholder="Name" maxlength="16" autofocus>
-    <label>Color</label>
-    <div class="option-row">
-      <input type="color" id="color-picker" value="#4488ff">
+    <div id="cube-preview-wrap" style="display:flex;flex-direction:column;align-items:center;gap:4px;margin:4px 0;">
+      <canvas id="cube-preview" width="120" height="120" style="border-radius:8px;cursor:pointer;"></canvas>
+      <span style="font-size:12px;color:#aaa;letter-spacing:1px;">CUSTOMIZE CHARACTER</span>
+      <div class="option-row" style="margin-top:2px;">
+        <input type="color" id="color-picker" value="#4488ff">
+      </div>
     </div>
-    <label>Skin image URL (optional)</label>
-    <input id="skin-image-input" type="text" placeholder="https://...">
     <div id="level-select"></div>
-    <button id="join-btn">JOIN</button>
+    <button id="join-btn">PLAY</button>
   </div>
   <div id="hud" style="display:none;">WASD to move &middot; Space to jump &middot; Shift to sprint</div>
   <div id="leader-display"></div>

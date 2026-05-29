@@ -73,7 +73,7 @@ function createAxisLabel(text, color, position) {
   const canvas = document.createElement('canvas');
   canvas.width = 64; canvas.height = 64;
   const ctx = canvas.getContext('2d');
-  ctx.font = 'bold 48px monospace';
+  ctx.font = 'bold 48px 04b_03, Lato, sans-serif';
   ctx.fillStyle = color;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -277,7 +277,9 @@ let mobileSprinting = false;
 let lastJoystickTap = 0;
 let airTime = 0;
 let lastGroundedTime = 0;
-const COYOTE_TIME = 0.025;
+const COYOTE_TIME = 0.15;
+let jumpBufferTimer = 0;
+const JUMP_BUFFER_TIME = 0.12;
 
 // --- Charge jump state ---
 const CHARGE_RATE = 3;
@@ -352,23 +354,117 @@ const spawnMarkers = [];
 let spawnClickCooldown = 0;
 
 // --- Join screen ---
+const DEFAULT_NAMES = ['Blockhead', 'Squarold', 'Edgelord', 'Hexahedron', 'Rhombert', 'Squaredward'];
+const randomDefault = DEFAULT_NAMES[Math.floor(Math.random() * DEFAULT_NAMES.length)];
 const nameScreen = document.getElementById('name-screen');
 const nameInput = document.getElementById('name-input');
+nameInput.placeholder = randomDefault;
 const joinBtn = document.getElementById('join-btn');
 const hud = document.getElementById('hud');
 const leaderDisplay = document.getElementById('leader-display');
 const colorPicker = document.getElementById('color-picker');
-const skinImageInput = document.getElementById('skin-image-input');
-let playerName = 'Player';
+let playerName = randomDefault;
 let playerShape = 'roundcube';
 let playerColor = '#4488ff';
 let playerSkinImage = '';
 let gameStarted = false;
 
+// --- Random starting color (saturated hue) ---
+(function setRandomColor() {
+  const hue = Math.floor(Math.random() * 360);
+  const c = document.createElement('canvas'); c.width = 1; c.height = 1;
+  const cx = c.getContext('2d');
+  cx.fillStyle = `hsl(${hue}, 100%, 50%)`;
+  cx.fillRect(0, 0, 1, 1);
+  const [r, g, b] = cx.getImageData(0, 0, 1, 1).data;
+  const hex = '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('');
+  colorPicker.value = hex;
+  playerColor = hex;
+})();
+
+// --- Animated 3D title ---
+(async function initTitle() {
+  const tc = document.getElementById('title-canvas');
+  if (!tc) return;
+  try { await document.fonts.load("8px '04b_03'"); } catch(e) {}
+  const ctx = tc.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  const W = tc.width, H = tc.height;
+  const text = 'CUBE FIGHT!';
+  const fontSize = 16;
+  const t0 = performance.now();
+
+  function drawTitle() {
+    if (gameStarted) return;
+    requestAnimationFrame(drawTitle);
+    const t = (performance.now() - t0) / 1000;
+    ctx.clearRect(0, 0, W, H);
+
+    ctx.font = `${fontSize}px '04b_03', sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // Flickering shadow copies behind the main text
+    for (let d = 3; d >= 1; d--) {
+      const flicker = Math.random();
+      if (flicker < 0.3) continue;
+      const brightness = Math.floor(20 + Math.random() * 30);
+      ctx.globalAlpha = 0.3 + Math.random() * 0.4;
+      ctx.fillStyle = `rgb(${brightness},${brightness},${brightness})`;
+      ctx.fillText(text, W / 2 + d, H / 2 + d);
+    }
+
+    // Main white text
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(text, W / 2, H / 2);
+  }
+  drawTitle();
+})();
+
+// --- 3D cube preview ---
+(function initCubePreview() {
+  const cvs = document.getElementById('cube-preview');
+  if (!cvs) return;
+  const pRenderer = new THREE.WebGLRenderer({ canvas: cvs, antialias: true, alpha: true });
+  pRenderer.setSize(120, 120);
+  pRenderer.setClearColor(0x000000, 0);
+
+  const pScene = new THREE.Scene();
+  const pCam = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
+  pCam.position.set(0, 0.8, 2.8);
+  pCam.lookAt(0, 0, 0);
+
+  pScene.add(new THREE.AmbientLight(0xffffff, 0.6));
+  const dl = new THREE.DirectionalLight(0xffffff, 0.9);
+  dl.position.set(2, 3, 2);
+  pScene.add(dl);
+
+  const cubeGeo = new THREE.BoxGeometry(1, 1, 1);
+  const cubeMat = new THREE.MeshStandardMaterial({ color: playerColor });
+  const cubeMesh = new THREE.Mesh(cubeGeo, cubeMat);
+  pScene.add(cubeMesh);
+
+  colorPicker.addEventListener('input', () => {
+    playerColor = colorPicker.value;
+    cubeMat.color.set(playerColor);
+  });
+
+  function animCube() {
+    if (gameStarted) { pRenderer.dispose(); return; }
+    requestAnimationFrame(animCube);
+    const t = performance.now() / 1000;
+    cubeMesh.rotation.y = t * 0.8;
+    cubeMesh.rotation.x = Math.sin(t * 0.6) * 0.3;
+    pRenderer.render(pScene, pCam);
+  }
+  animCube();
+})();
+
 function joinGame() {
-  playerName = nameInput.value.trim().slice(0, 16) || 'Player';
+  playerName = nameInput.value.trim().slice(0, 16) || randomDefault;
   playerColor = colorPicker.value;
-  playerSkinImage = skinImageInput.value.trim();
+  playerSkinImage = '';
   nameScreen.style.display = 'none';
   hud.style.display = '';
   leaderDisplay.style.display = '';
@@ -602,12 +698,12 @@ initLevelSelect();
 // --- Score sprite for leader ---
 function createScoreSprite() {
   const canvas = document.createElement('canvas');
-  canvas.width = 128; canvas.height = 32;
+  canvas.width = 256; canvas.height = 80;
   const ctx = canvas.getContext('2d');
   const texture = new THREE.CanvasTexture(canvas);
   const mat = new THREE.SpriteMaterial({ map: texture, depthTest: false });
   const sprite = new THREE.Sprite(mat);
-  sprite.scale.set(1.5, 0.35, 1);
+  sprite.scale.set(3, 0.9, 1);
   sprite.renderOrder = 999;
   sprite.visible = false;
   sprite.userData.canvas = canvas;
@@ -618,14 +714,14 @@ function createScoreSprite() {
 function updateScoreSpriteText(sprite, score) {
   const canvas = sprite.userData.canvas;
   const ctx = sprite.userData.ctx;
-  ctx.clearRect(0, 0, 128, 32);
-  ctx.font = 'bold 22px monospace';
+  ctx.clearRect(0, 0, 256, 80);
+  ctx.font = 'bold 52px Lato, LatoExtended, sans-serif';
   ctx.textAlign = 'center';
   ctx.fillStyle = '#ffd700';
   ctx.strokeStyle = 'rgba(0,0,0,0.7)';
-  ctx.lineWidth = 3;
-  ctx.strokeText(String(score), 64, 24);
-  ctx.fillText(String(score), 64, 24);
+  ctx.lineWidth = 4;
+  ctx.strokeText(String(score), 128, 58);
+  ctx.fillText(String(score), 128, 58);
   sprite.material.map.needsUpdate = true;
 }
 
@@ -696,6 +792,35 @@ if (isMobile) {
     joystickX = mag < JOYSTICK_DEADZONE ? 0 : rawX;
     joystickZ = mag < JOYSTICK_DEADZONE ? 0 : rawZ;
   }
+
+  // Touch-drag camera rotation (touches not on joystick or jump button)
+  let camTouchId = null;
+  let camTouchLastX = 0, camTouchLastY = 0;
+  const CAM_TOUCH_SENSITIVITY = 0.005;
+
+  renderer.domElement.addEventListener('touchstart', (e) => {
+    if (camTouchId !== null) return;
+    const t = e.changedTouches[0];
+    camTouchId = t.identifier;
+    camTouchLastX = t.clientX;
+    camTouchLastY = t.clientY;
+  });
+  window.addEventListener('touchmove', (e) => {
+    if (camTouchId === null) return;
+    const t = findTouch(e.touches, camTouchId);
+    if (!t) return;
+    const dx = t.clientX - camTouchLastX;
+    const dy = t.clientY - camTouchLastY;
+    camTouchLastX = t.clientX;
+    camTouchLastY = t.clientY;
+    camYaw -= dx * CAM_TOUCH_SENSITIVITY;
+    camPitch += dy * CAM_TOUCH_SENSITIVITY;
+    camPitch = Math.max(CAM_PITCH_MIN, Math.min(CAM_PITCH_MAX, camPitch));
+    lastMouseMoveTime = performance.now() / 1000;
+  }, { passive: true });
+  window.addEventListener('touchend', (e) => {
+    if (findTouch(e.changedTouches, camTouchId)) camTouchId = null;
+  });
 } else {
   window.addEventListener('keydown', (e) => {
     keys[e.code] = true;
@@ -717,19 +842,21 @@ window.addEventListener('resize', () => {
 // --- Name label sprite ---
 function createNameSprite(name) {
   const canvas = document.createElement('canvas');
-  canvas.width = 256; canvas.height = 64;
+  canvas.width = 512; canvas.height = 128;
   const ctx = canvas.getContext('2d');
-  ctx.font = 'bold 32px monospace';
+  ctx.font = 'bold 56px Lato, LatoExtended, sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillStyle = 'rgba(0,0,0,0.5)';
-  ctx.roundRect(28, 4, 200, 44, 8);
+  const textW = Math.min(ctx.measureText(name).width + 40, 500);
+  const boxX = (512 - textW) / 2;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.roundRect(boxX, 8, textW, 80, 12);
   ctx.fill();
   ctx.fillStyle = '#ffffff';
-  ctx.fillText(name, 128, 38);
+  ctx.fillText(name, 256, 68);
   const texture = new THREE.CanvasTexture(canvas);
   const mat = new THREE.SpriteMaterial({ map: texture, depthTest: false });
   const sprite = new THREE.Sprite(mat);
-  sprite.scale.set(2, 0.5, 1);
+  sprite.scale.set(3.5, 0.9, 1);
   return sprite;
 }
 
@@ -1023,22 +1150,34 @@ function handleMovement(delta) {
     jumpCharge = Math.min(jumpCharge + CHARGE_RATE * delta, MAX_CHARGE_MULT);
   }
 
-  // Jump fires ONLY on space release, and resets charge
+  // Jump fires on space release; buffer the attempt briefly if airborne
+  if (jumpBufferTimer > 0) jumpBufferTimer -= delta;
+
   if (!keys['Space'] && isChargingJump) {
-    // Only jump if we are on the ground or within coyote time window
     if (canJump) {
       localBody.velocity.y = JUMP_IMPULSE * jumpCharge;
-      // Cooldown duration is proportional to jump charge (1s per 1x).
-      // The bar starts at a width proportional to charge and shrinks at a constant rate.
       jumpCooldownMax = jumpCharge;
       jumpCooldownTimer = jumpCharge;
       jumpCooldownStartPct = jumpCharge / MAX_CHARGE_MULT;
       playRandomJumpSound(localBody.position);
       socket.emit('jump');
+      jumpBufferTimer = 0;
+    } else {
+      jumpBufferTimer = JUMP_BUFFER_TIME;
     }
-    // Reset charge regardless of success (i.e. if you release in mid-air)
     isChargingJump = false;
     jumpCharge = 0;
+  }
+
+  // Buffered jump: if we land while buffer is still active, fire the jump
+  if (jumpBufferTimer > 0 && canJump && jumpCooldownTimer <= 0) {
+    localBody.velocity.y = JUMP_IMPULSE;
+    jumpCooldownMax = 1;
+    jumpCooldownTimer = 1;
+    jumpCooldownStartPct = 1 / MAX_CHARGE_MULT;
+    playRandomJumpSound(localBody.position);
+    socket.emit('jump');
+    jumpBufferTimer = 0;
   }
 
   // Tag cooldown tick
@@ -1086,32 +1225,17 @@ let cameraLookAtTarget = new THREE.Vector3();
 let mouseDragging = false;
 let pointerLockSupported = false;
 
-renderer.domElement.addEventListener('click', () => {
-  if (!pointerLockSupported) return;
-  if (godmode) return;
-  renderer.domElement.requestPointerLock();
-});
-
-document.addEventListener('pointerlockchange', () => {
-  if (document.pointerLockElement === renderer.domElement) pointerLockSupported = true;
-});
-document.addEventListener('pointerlockerror', () => {
-  pointerLockSupported = false;
-});
+renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
 
 renderer.domElement.addEventListener('mousedown', (e) => {
-  if (document.pointerLockElement === renderer.domElement) return;
-  if (godmode) {
-    if (e.button === 2) mouseDragging = true;
-    return;
-  }
-  if (e.button === 0 || e.button === 2) mouseDragging = true;
+  if (e.button === 2) mouseDragging = true;
 });
-window.addEventListener('mouseup', () => { mouseDragging = false; });
+window.addEventListener('mouseup', (e) => {
+  if (e.button === 2) mouseDragging = false;
+});
 
 document.addEventListener('mousemove', (e) => {
-  const hasLock = document.pointerLockElement === renderer.domElement;
-  if (!hasLock && !mouseDragging) return;
+  if (!mouseDragging) return;
   lastMouseMoveTime = performance.now() / 1000;
 
   if (godmode) {
@@ -1545,7 +1669,7 @@ function handleGodmode(delta) {
 let debugVisible = false;
 const debugEl = document.createElement('div');
 debugEl.id = 'debug-hud';
-debugEl.style.cssText = 'position:absolute;top:10px;right:10px;color:#0f0;font:12px monospace;background:rgba(0,0,0,0.6);padding:8px 12px;border-radius:4px;white-space:pre;display:none;pointer-events:none;';
+debugEl.style.cssText = 'position:absolute;top:10px;right:10px;color:#0f0;font:12px 04b_03, Lato, sans-serif;background:rgba(0,0,0,0.6);padding:8px 12px;border-radius:4px;white-space:pre;display:none;pointer-events:none;';
 document.body.appendChild(debugEl);
 
 window.addEventListener('keydown', (e) => {
