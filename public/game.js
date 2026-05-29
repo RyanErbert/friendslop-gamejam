@@ -280,6 +280,7 @@ const outlineMeshes = new Map();
 let joystickX = 0, joystickZ = 0;
 let mobileSprinting = false;
 let lastJoystickTap = 0;
+let tiltX = 0, tiltZ = 0;
 let airTime = 0;
 let lastGroundedTime = 0;
 const COYOTE_TIME = 0.15;
@@ -457,7 +458,7 @@ function updateParticles(delta) {
 // --- Inventory HUD ---
 const inventoryHud = document.createElement('div');
 inventoryHud.id = 'inventory-hud';
-inventoryHud.style.cssText = 'position:absolute;top:10px;left:10px;display:flex;align-items:flex-start;gap:10px;z-index:20;pointer-events:none;';
+inventoryHud.style.cssText = 'position:absolute;top:10px;left:10px;display:flex;align-items:flex-start;gap:10px;z-index:20;';
 document.body.appendChild(inventoryHud);
 
 function getColorForItem(item) {
@@ -465,6 +466,14 @@ function getColorForItem(item) {
   if (['machinegun', 'rocket', 'mines'].includes(item)) return '#ff4444';
   if (['block', 'wall', 'ramp', 'platform', 'bridge_gun'].includes(item)) return '#ffff44';
   return '#ffffff';
+}
+
+function swapToFirst(index) {
+  if (index <= 0 || index >= inventory.length) return;
+  const temp = inventory[0];
+  inventory[0] = inventory[index];
+  inventory[index] = temp;
+  updateInventoryUI();
 }
 
 function updateInventoryUI() {
@@ -484,8 +493,13 @@ function updateInventoryUI() {
       color:white; font:10px "04b_03",Lato,sans-serif; text-align:center; text-transform:uppercase;
       transition: all 0.2s ease-in-out;
       transform: none; opacity: 1;
+      ${isMain ? 'pointer-events:none;' : 'cursor:pointer;'}
     `;
-    slot.innerHTML = `<div>${item.replace('_', ' ')}</div>${invObj.ammo > 0 ? `<div style="font-size:16px;margin-top:4px;color:#ff4444">${invObj.ammo}</div>` : ''}`;
+    slot.innerHTML = `<div>${item.replace('_', ' ')}</div>${invObj.ammo > 0 && invObj.ammo !== Infinity ? `<div style="font-size:16px;margin-top:4px;color:#ff4444">${invObj.ammo}</div>` : ''}${invObj.ammo === Infinity ? `<div style="font-size:10px;margin-top:4px;color:#44aaff">∞</div>` : ''}`;
+    if (!isMain) {
+      slot.addEventListener('click', () => swapToFirst(index));
+      slot.addEventListener('touchstart', (e) => { e.preventDefault(); swapToFirst(index); });
+    }
     inventoryHud.appendChild(slot);
   });
 }
@@ -535,15 +549,24 @@ function getAimDirection() {
   return aimPoint.sub(playerOrigin).normalize();
 }
 
+function useAmmo() {
+  if (infiniteAmmo) return;
+  inventory[0].ammo--;
+  updateInventoryUI();
+  if (inventory[0].ammo <= 0) shiftInventory(inventory[0].type, null);
+}
+
 function consumeItem(targetPt) {
   if (inventory.length === 0) return;
   const item = inventory[0].type;
 
   if (item === 'grapple') {
-    if (!targetPt) return; // Require a valid 3D target surface
+    if (!targetPt) return;
     isGrappling = true;
     grappleTarget = new THREE.Vector3(targetPt.x, targetPt.y, targetPt.z);
     playWorldSound(boostSound, localBody ? localBody.position : null, 0.8);
+    useAmmo();
+    return;
   } else if (['launch_pad', 'boost_pad', 'mines'].includes(item)) {
     if (!targetPt || !localPlayer || localPlayer.position.distanceTo(targetPt) > 10) return;
     if (item === 'mines') socket.emit('placeMine', targetPt);
@@ -571,9 +594,7 @@ function consumeItem(targetPt) {
   } else if (['block', 'wall', 'ramp', 'platform'].includes(item)) {
     if (!buildTarget || !buildCanPlace) return;
     socket.emit('placeBuild', { type: item, ...buildTarget });
-    inventory[0].ammo--;
-    updateInventoryUI();
-    if (inventory[0].ammo <= 0) shiftInventory(item, null);
+    useAmmo();
     return;
   } else if (item === 'bridge_gun') {
     if (!targetPt || !localBody) return;
@@ -587,9 +608,7 @@ function consumeItem(targetPt) {
     const mid = origin.clone().lerp(target, 0.5);
     const dir = new THREE.Vector3().subVectors(target, origin).normalize();
     socket.emit('placeBuild', { type: 'bridge', x: mid.x, y: mid.y, z: mid.z, ry: Math.atan2(dir.x, dir.z), rx: -Math.asin(dir.y), length: dist });
-    inventory[0].ammo--;
-    updateInventoryUI();
-    if (inventory[0].ammo <= 0) shiftInventory(item, targetPt);
+    useAmmo();
     return;
   } else if (item === 'rocket') {
     if (!localBody || rocketCooldownTimer > 0) return;
@@ -603,11 +622,7 @@ function consumeItem(targetPt) {
     socket.emit('fireRocket', { start, velocity });
 
     rocketCooldownTimer = 2.0;
-    inventory[0].ammo--;
-    updateInventoryUI();
-    if (inventory[0].ammo <= 0) {
-      shiftInventory(item, targetPt);
-    }
+    useAmmo();
     return;
   }
 
@@ -655,11 +670,13 @@ function startMachinegun() {
 
     const start = origin.clone().addScaledVector(noisyDir, 2.0);
     socket.emit('fireMachinegun', { start, velocity: noisyDir.multiplyScalar(200) });
-    inventory[0].ammo--;
-    updateInventoryUI();
-    if (inventory[0].ammo <= 0) {
-      stopMachinegun();
-      shiftInventory('machinegun', null);
+    if (!infiniteAmmo) {
+      inventory[0].ammo--;
+      updateInventoryUI();
+      if (inventory[0].ammo <= 0) {
+        stopMachinegun();
+        shiftInventory('machinegun', null);
+      }
     }
   }, 80);
 }
@@ -778,6 +795,14 @@ function returnToMenu() {
   pedestalMeshes.length = 0;
 
   gameStarted = false;
+  if (isMobile) {
+    const jb = document.getElementById('joystick-base');
+    const jmp = document.getElementById('jump-btn');
+    const mhb = document.getElementById('mobile-hud-bar');
+    if (jb) jb.style.display = 'none';
+    if (jmp) jmp.style.display = 'none';
+    if (mhb) mhb.style.display = 'none';
+  }
   nameScreen.style.display = '';
   hud.style.display = 'none';
   hud.style.opacity = '1';
@@ -787,6 +812,7 @@ function returnToMenu() {
   debugEl.style.display = 'none';
   debugVisible = false;
   if (menuOverlay) menuOverlay.style.display = 'block';
+  initLevelSelect();
   inactivityBanner.style.display = 'none';
   inactivityWarningShown = false;
   sprintMeter.wrap.style.display = 'none';
@@ -1295,6 +1321,47 @@ let playerShape = 'roundcube';
 let playerColor = '#4488ff';
 let playerSkinImage = '';
 let gameStarted = false;
+let startingWeapon = 'none';
+let infiniteAmmo = false;
+let gameType = 'reverse-tag';
+let scoreLimit = 1000;
+let playerModel = 'none';
+
+// --- Lobby settings ---
+document.querySelectorAll('.weapon-opt').forEach(el => {
+  el.addEventListener('click', () => {
+    if (el.classList.contains('disabled')) return;
+    document.querySelectorAll('.weapon-opt').forEach(o => o.classList.remove('selected'));
+    el.classList.add('selected');
+    startingWeapon = el.dataset.weapon;
+  });
+});
+document.querySelectorAll('[data-gametype]').forEach(el => {
+  el.addEventListener('click', () => {
+    if (el.classList.contains('disabled')) return;
+    document.querySelectorAll('[data-gametype]').forEach(o => o.classList.remove('selected'));
+    el.classList.add('selected');
+    gameType = el.dataset.gametype;
+  });
+});
+document.querySelectorAll('[data-duration]').forEach(el => {
+  el.addEventListener('click', () => {
+    if (el.classList.contains('disabled')) return;
+    document.querySelectorAll('[data-duration]').forEach(o => o.classList.remove('selected'));
+    el.classList.add('selected');
+    scoreLimit = parseInt(el.dataset.duration);
+  });
+});
+document.querySelectorAll('.model-opt').forEach(el => {
+  el.addEventListener('click', () => {
+    if (el.classList.contains('disabled')) return;
+    document.querySelectorAll('.model-opt').forEach(o => o.classList.remove('selected'));
+    el.classList.add('selected');
+    playerModel = el.dataset.model;
+  });
+});
+const infiniteAmmoCheck = document.getElementById('infinite-ammo-check');
+if (infiniteAmmoCheck) infiniteAmmoCheck.addEventListener('change', () => { infiniteAmmo = infiniteAmmoCheck.checked; });
 
 // --- Random starting color (saturated hue) ---
 (function setRandomColor() {
@@ -1316,7 +1383,7 @@ let gameStarted = false;
 
   const versionDiv = document.createElement('div');
   versionDiv.textContent = GAME_VERSION;
-  versionDiv.style.cssText = 'color:#aaa; font:10px "04b_03", Lato, sans-serif; letter-spacing:1px; margin-top:-40px; margin-bottom:30px; text-align:center; position:relative; z-index:10;';
+  versionDiv.style.cssText = 'color:#aaa; font:10px "04b_03", Lato, sans-serif; letter-spacing:1px; margin-top:2px; margin-bottom:4px; text-align:center; position:relative; z-index:10;';
   tc.parentNode.insertBefore(versionDiv, tc.nextSibling);
 
   try { await document.fonts.load("8px '04b_03'"); } catch(e) {}
@@ -1368,40 +1435,107 @@ let gameStarted = false;
   pCam.position.set(0, 0.8, 2.8);
   pCam.lookAt(0, 0, 0);
 
-  pScene.add(new THREE.AmbientLight(0xffffff, 0.6));
-  const dl = new THREE.DirectionalLight(0xffffff, 0.9);
+  pScene.add(new THREE.AmbientLight(0xffffff, 1.2));
+  const dl = new THREE.DirectionalLight(0xffffff, 1.5);
   dl.position.set(2, 3, 2);
   pScene.add(dl);
+  const dl2 = new THREE.DirectionalLight(0xaaccff, 0.8);
+  dl2.position.set(-2, 1, -1);
+  pScene.add(dl2);
+  pScene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.6));
 
   const cubeGeo = new THREE.BoxGeometry(1, 1, 1);
-  const cubeMat = new THREE.MeshStandardMaterial({ color: playerColor });
+  const cubeMat = new THREE.MeshPhysicalMaterial({ color: playerColor, transparent: true, opacity: 0.7, roughness: 0.02, metalness: 0.9, clearcoat: 1.0, clearcoatRoughness: 0.02, emissive: playerColor, emissiveIntensity: 0.15 });
   const cubeMesh = new THREE.Mesh(cubeGeo, cubeMat);
   pScene.add(cubeMesh);
+
+  // Cel-shade outline for preview cube
+  const outlineGeo = cubeGeo.clone();
+  const outlineMat = new THREE.MeshBasicMaterial({ color: playerColor, side: THREE.BackSide });
+  const cubeOutline = new THREE.Mesh(outlineGeo, outlineMat);
+  cubeOutline.scale.setScalar(1.06);
+  cubeMesh.add(cubeOutline);
+
+  let previewRat = null;
+  let previewMixer = null;
+  const previewRatPivot = new THREE.Group();
+  pScene.add(previewRatPivot);
+
+  function loadPreviewRat() {
+    if (previewRat) return;
+    const loader = new THREE.GLTFLoader();
+    loader.load('/players/rat.glb', (gltf) => {
+      previewRat = gltf.scene;
+      const box = new THREE.Box3().setFromObject(previewRat);
+      const size = box.getSize(new THREE.Vector3());
+      const maxDim = Math.max(size.x, size.y, size.z);
+      const scale = (0.7 / maxDim) * 1.5;
+      previewRat.scale.setScalar(scale);
+      const center = box.getCenter(new THREE.Vector3());
+      const bottom = box.min.y;
+      previewRat.position.set(-center.x * scale, -bottom * scale - 1.2, -center.z * scale);
+      previewRatPivot.add(previewRat);
+      if (gltf.animations && gltf.animations.length > 0) {
+        previewMixer = new THREE.AnimationMixer(previewRat);
+        for (const clip of gltf.animations) {
+          if (clip.name.toLowerCase().includes('idle')) {
+            previewMixer.clipAction(clip).play();
+            break;
+          }
+        }
+      }
+    });
+  }
+
+  document.querySelectorAll('.model-opt').forEach(el => {
+    el.addEventListener('click', () => {
+      if (el.dataset.model === 'rat') {
+        loadPreviewRat();
+        previewRatPivot.visible = true;
+      } else {
+        previewRatPivot.visible = false;
+      }
+    });
+  });
 
   colorPicker.addEventListener('input', () => {
     playerColor = colorPicker.value;
     cubeMat.color.set(playerColor);
+    cubeMat.emissive.set(playerColor);
+    outlineMat.color.set(playerColor);
   });
 
-  colorPicker.style.display = 'none';
+  if (isMobile) {
+    const wrap = document.getElementById('cube-preview-wrap');
+    wrap.style.position = 'relative';
+    colorPicker.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;opacity:0;cursor:pointer;z-index:11;';
+    wrap.appendChild(colorPicker);
+  } else {
+    colorPicker.style.display = 'none';
+    cvs.style.cursor = 'pointer';
+    cvs.addEventListener('click', () => colorPicker.click());
 
-  cvs.style.cursor = 'pointer';
-  cvs.addEventListener('click', () => colorPicker.click());
-
-  const existingCustomizeBtn = Array.from(document.querySelectorAll('*')).find(el => el.childNodes.length === 1 && el.textContent.trim().toUpperCase() === 'CUSTOMIZE CHARACTER');
-  if (existingCustomizeBtn) {
-    existingCustomizeBtn.style.cursor = 'pointer';
-    existingCustomizeBtn.style.position = 'relative';
-    existingCustomizeBtn.style.zIndex = '10';
-    existingCustomizeBtn.addEventListener('click', () => colorPicker.click());
+    const existingCustomizeBtn = Array.from(document.querySelectorAll('*')).find(el => el.childNodes.length === 1 && el.textContent.trim().toUpperCase() === 'CUSTOMIZE CHARACTER');
+    if (existingCustomizeBtn) {
+      existingCustomizeBtn.style.cursor = 'pointer';
+      existingCustomizeBtn.style.position = 'relative';
+      existingCustomizeBtn.style.zIndex = '10';
+      existingCustomizeBtn.addEventListener('click', () => colorPicker.click());
+    }
   }
 
+  let lastPreviewTime = performance.now();
   function animCube() {
     if (gameStarted) { pRenderer.dispose(); return; }
     requestAnimationFrame(animCube);
-    const t = performance.now() / 1000;
+    const now = performance.now();
+    const dt = (now - lastPreviewTime) / 1000;
+    lastPreviewTime = now;
+    const t = now / 1000;
     cubeMesh.rotation.y = t * 0.8;
     cubeMesh.rotation.x = Math.sin(t * 0.6) * 0.3;
+    previewRatPivot.rotation.y = t * 0.8;
+    if (previewMixer) previewMixer.update(dt);
     pRenderer.render(pScene, pCam);
   }
   animCube();
@@ -1438,6 +1572,14 @@ function joinGame() {
   cleanupPreviews();
 
   gameStarted = true;
+  if (isMobile) {
+    const jb = document.getElementById('joystick-base');
+    const jmp = document.getElementById('jump-btn');
+    const mhb = document.getElementById('mobile-hud-bar');
+    if (jb) jb.style.display = '';
+    if (jmp) jmp.style.display = 'flex';
+    if (mhb) mhb.style.display = 'flex';
+  }
   clock.start();
   startGame();
 }
@@ -1541,7 +1683,7 @@ async function initLevelSelect() {
     const selectDiv = document.getElementById('level-select');
     if (!selectDiv) return;
 
-    if (stateRes.playerCount > 0 || stateRes.levelLocked) {
+    if (stateRes.levelLocked) {
       selectDiv.style.display = 'none';
       return;
     }
@@ -1553,7 +1695,7 @@ async function initLevelSelect() {
     }
 
     selectDiv.style.display = 'block';
-    selectDiv.innerHTML = '<h2>SELECT LEVEL</h2><div class="level-grid"></div>';
+    selectDiv.innerHTML = '<div class="level-carousel"><div class="level-arrow" id="level-arrow-left">◀</div><div class="level-grid"></div><div class="level-arrow" id="level-arrow-right">▶</div></div>';
     const grid = selectDiv.querySelector('.level-grid');
 
     for (const filename of levelsRes) {
@@ -1571,6 +1713,32 @@ async function initLevelSelect() {
       if (filename === selectedLevel) {
         preview.wrapper.classList.add('selected');
       }
+    }
+
+    // Arrow buttons
+    const arrowLeft = document.getElementById('level-arrow-left');
+    const arrowRight = document.getElementById('level-arrow-right');
+    const cardWidth = () => grid.querySelector('.level-card')?.offsetWidth + 12 || 232;
+    arrowLeft.addEventListener('click', () => grid.scrollBy({ left: -cardWidth(), behavior: 'smooth' }));
+    arrowRight.addEventListener('click', () => grid.scrollBy({ left: cardWidth(), behavior: 'smooth' }));
+
+    // Drag-to-scroll (desktop)
+    let dragStart = null, dragScrollLeft = 0;
+    grid.addEventListener('mousedown', (e) => { dragStart = e.pageX; dragScrollLeft = grid.scrollLeft; grid.style.cursor = 'grabbing'; });
+    window.addEventListener('mousemove', (e) => { if (dragStart === null) return; grid.scrollLeft = dragScrollLeft - (e.pageX - dragStart); });
+    window.addEventListener('mouseup', () => { if (dragStart === null) return; dragStart = null; grid.style.cursor = ''; snapToNearest(); });
+
+    // Snap to nearest card after scroll ends (touch or drag)
+    let snapTimeout = null;
+    grid.addEventListener('scroll', () => { clearTimeout(snapTimeout); snapTimeout = setTimeout(snapToNearest, 120); });
+    function snapToNearest() {
+      const cards = grid.querySelectorAll('.level-card');
+      if (!cards.length) return;
+      const gridRect = grid.getBoundingClientRect();
+      const center = gridRect.left + gridRect.width / 2;
+      let closest = cards[0], minDist = Infinity;
+      cards.forEach(c => { const d = Math.abs(c.getBoundingClientRect().left + c.offsetWidth / 2 - center); if (d < minDist) { minDist = d; closest = c; } });
+      closest.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
     }
 
     previewsActive = true;
@@ -1688,10 +1856,47 @@ let localScoreSprite = null;
 
 // --- Mobile controls ---
 if (isMobile) {
-  hud.textContent = 'Drag joystick to move · Tap JUMP';
+  hud.textContent = 'Drag joystick to move · Tilt to steer · Tap JUMP';
+
+  // Tilt (accelerometer) input blended with joystick
+  const TILT_SENSITIVITY = 0.04;
+  const TILT_DEADZONE = 3; // degrees
+  const TILT_MAX = 25; // degrees for full deflection
+
+  function requestTilt() {
+    if (typeof DeviceOrientationEvent !== 'undefined' && DeviceOrientationEvent.requestPermission) {
+      DeviceOrientationEvent.requestPermission().then(state => {
+        if (state === 'granted') enableTilt();
+      }).catch(() => {});
+    } else {
+      enableTilt();
+    }
+  }
+
+  function enableTilt() {
+    window.addEventListener('deviceorientation', (e) => {
+      if (e.gamma === null || e.beta === null) return;
+      const rawX = e.gamma; // left/right tilt (-90..90)
+      const rawZ = e.beta - 30; // forward/back tilt, offset for natural hold angle
+      const applyDeadzone = (v) => {
+        if (Math.abs(v) < TILT_DEADZONE) return 0;
+        const sign = v > 0 ? 1 : -1;
+        return sign * Math.min((Math.abs(v) - TILT_DEADZONE) / (TILT_MAX - TILT_DEADZONE), 1);
+      };
+      tiltX = applyDeadzone(rawX);
+      tiltZ = applyDeadzone(rawZ);
+    });
+  }
+
+  // Request tilt on first touch interaction (needed for iOS permission)
+  document.addEventListener('touchstart', function tiltInit() {
+    requestTilt();
+    document.removeEventListener('touchstart', tiltInit);
+  }, { once: true });
 
   const joystickBase = document.createElement('div');
   joystickBase.id = 'joystick-base';
+  joystickBase.style.display = 'none';
   const joystickKnob = document.createElement('div');
   joystickKnob.id = 'joystick-knob';
   joystickBase.appendChild(joystickKnob);
@@ -1700,10 +1905,46 @@ if (isMobile) {
   const jumpBtn = document.createElement('div');
   jumpBtn.id = 'jump-btn';
   jumpBtn.textContent = 'JUMP';
+  jumpBtn.style.display = 'none';
   document.body.appendChild(jumpBtn);
 
   jumpBtn.addEventListener('touchstart', (e) => { e.preventDefault(); keys['Space'] = true; });
   jumpBtn.addEventListener('touchend', (e) => { e.preventDefault(); keys['Space'] = false; });
+
+  // Mobile HUD buttons (Tab, Console, God)
+  const mobileHudBar = document.createElement('div');
+  mobileHudBar.id = 'mobile-hud-bar';
+  mobileHudBar.style.cssText = 'position:absolute;bottom:8px;left:50%;transform:translateX(-50%);display:none;gap:10px;z-index:30;';
+  const mobileButtons = [
+    { label: 'TAB', action: 'tab' },
+    { label: 'CON', action: 'console' },
+    { label: 'GOD', action: 'god' }
+  ];
+  mobileButtons.forEach(btn => {
+    const el = document.createElement('div');
+    el.className = 'mobile-hud-btn';
+    el.textContent = btn.label;
+    el.style.cssText = 'padding:6px 14px;background:rgba(0,0,0,0.6);border:2px solid rgba(255,255,255,0.4);border-radius:6px;color:white;font:10px "04b_03",Lato,sans-serif;letter-spacing:1px;user-select:none;-webkit-user-select:none;touch-action:none;cursor:pointer;';
+    if (btn.action === 'tab') {
+      el.addEventListener('touchstart', (e) => { e.preventDefault(); tabHeld = true; });
+      el.addEventListener('touchend', (e) => { e.preventDefault(); tabHeld = false; });
+    } else if (btn.action === 'console') {
+      el.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        debugVisible = !debugVisible;
+        debugEl.style.display = debugVisible ? '' : 'none';
+      });
+    } else if (btn.action === 'god') {
+      el.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        if (!gameStarted) return;
+        const evt = new KeyboardEvent('keydown', { code: 'F4', bubbles: true });
+        window.dispatchEvent(evt);
+      });
+    }
+    mobileHudBar.appendChild(el);
+  });
+  document.body.appendChild(mobileHudBar);
 
   let joystickTouchId = null;
   const JOYSTICK_RADIUS = 50;
@@ -1805,6 +2046,8 @@ if (isMobile) {
     keys[e.code] = true;
     if (e.code === 'Space') e.preventDefault();
     if (e.code === 'Tab') e.preventDefault();
+    if (e.code === 'Digit2') swapToFirst(1);
+    if (e.code === 'Digit3') swapToFirst(2);
     if (e.altKey || e.code.startsWith('F')) {
       if (document.pointerLockElement) e.preventDefault();
     }
@@ -1919,7 +2162,9 @@ function smoothRoundcube(geo, smoothingVal = roundcubeSmoothing) {
   return geo;
 }
 
-function createPlayerVisual(color, shape, name, skinImage) {
+const playerAnimMixers = new Map();
+
+function createPlayerVisual(color, shape, name, skinImage, model) {
   const group = new THREE.Group();
 
   let geo = createShapeGeo(shape);
@@ -1928,9 +2173,9 @@ function createPlayerVisual(color, shape, name, skinImage) {
   let mat;
   if (skinImage) {
     const tex = new THREE.TextureLoader().load(skinImage);
-    mat = new THREE.MeshStandardMaterial({ map: tex });
+    mat = new THREE.MeshPhysicalMaterial({ map: tex, transparent: true, opacity: 0.3, roughness: 0.05, metalness: 0.8, clearcoat: 1.0, clearcoatRoughness: 0.05 });
   } else {
-    mat = new THREE.MeshStandardMaterial({ color });
+    mat = new THREE.MeshPhysicalMaterial({ color, transparent: true, opacity: 0.3, roughness: 0.05, metalness: 0.8, clearcoat: 1.0, clearcoatRoughness: 0.05 });
   }
 
   const mesh = new THREE.Mesh(geo, mat);
@@ -1940,6 +2185,42 @@ function createPlayerVisual(color, shape, name, skinImage) {
 
   const outline = createOutlineMesh(mesh);
   mesh.add(outline);
+
+  if (model === 'rat') {
+    const ratPivot = new THREE.Group();
+    group.add(ratPivot);
+    group.userData.ratPivot = ratPivot;
+    const loader = new THREE.GLTFLoader();
+    loader.load('/players/rat.glb', (gltf) => {
+      const ratModel = gltf.scene;
+      const box = new THREE.Box3().setFromObject(ratModel);
+      const size = box.getSize(new THREE.Vector3());
+      const maxDim = Math.max(size.x, size.y, size.z);
+      const scale = (0.7 / maxDim) * 1.5;
+      ratModel.scale.setScalar(scale);
+      const center = box.getCenter(new THREE.Vector3());
+      const bottom = box.min.y;
+      ratModel.position.set(-center.x * scale, -bottom * scale - 1.2, -center.z * scale);
+      ratPivot.add(ratModel);
+      group.userData.ratModel = ratModel;
+
+      if (gltf.animations && gltf.animations.length > 0) {
+        const mixer = new THREE.AnimationMixer(ratModel);
+        playerAnimMixers.set(group, mixer);
+        group.userData.animations = {};
+        for (const clip of gltf.animations) {
+          const shortName = clip.name.replace(/^Armature\|/, '').toLowerCase();
+          group.userData.animations[shortName] = clip;
+        }
+        const idleClip = group.userData.animations['idle'];
+        if (idleClip) {
+          const action = mixer.clipAction(idleClip);
+          action.play();
+          group.userData.currentAnim = 'idle';
+        }
+      }
+    });
+  }
 
   const label = createNameSprite(name);
   label.position.y = 1.2;
@@ -2031,7 +2312,10 @@ function handleMovement(delta) {
   if (!localBody) return;
 
   let inputX = 0, inputZ = 0;
-  if (isMobile) { inputX = joystickX; inputZ = joystickZ; }
+  if (isMobile) {
+    inputX = Math.max(-1, Math.min(1, joystickX + tiltX));
+    inputZ = Math.max(-1, Math.min(1, joystickZ + tiltZ));
+  }
   else {
     if (keys['KeyW']) inputZ -= 1;
     if (keys['KeyS']) inputZ += 1;
@@ -2248,9 +2532,8 @@ renderer.domElement.addEventListener('mousedown', (e) => {
         lastBuiltCell = `${buildTarget.x},${buildTarget.y},${buildTarget.z}`;
         socket.emit('placeBuild', { type, ...buildTarget });
         if (!godmode) {
-          inventory[0].ammo--;
-          updateInventoryUI();
-          if (inventory[0].ammo <= 0) { shiftInventory(type, null); isDraggingBuild = false; }
+          useAmmo();
+          if (inventory.length === 0 || inventory[0].type !== type) isDraggingBuild = false;
         }
       }
     }
@@ -2627,7 +2910,8 @@ function startGame() {
     name: playerName,
     shape: playerShape,
     skinColor: playerColor,
-    skinImage: playerSkinImage
+    skinImage: playerSkinImage,
+    model: playerModel
   });
 }
 
@@ -2636,7 +2920,7 @@ socket.on('currentPlayers', (data) => {
   for (const [id, info] of Object.entries(data.players)) {
     const shape = info.shape || info.type || 'box';
     const color = info.skinColor || info.color;
-    const { group, mesh, outline, crown, scoreSprite } = createPlayerVisual(color, shape, info.name, info.skinImage);
+    const { group, mesh, outline, crown, scoreSprite } = createPlayerVisual(color, shape, info.name, info.skinImage, info.model);
     group.position.set(info.x, info.y, info.z);
     if (id === selfId) {
       localPlayer = group;
@@ -2657,12 +2941,17 @@ socket.on('currentPlayers', (data) => {
       playerNames.set(id, info.name);
     }
   }
+  if (startingWeapon !== 'none') {
+    const ammoMap = { machinegun: 100, rocket: 3, mines: 3, grapple: 5 };
+    inventory.push({ type: startingWeapon, ammo: infiniteAmmo ? Infinity : (ammoMap[startingWeapon] || 0) });
+    updateInventoryUI();
+  }
 });
 
 socket.on('newPlayer', (data) => {
   const shape = data.shape || data.type || 'box';
   const color = data.skinColor || data.color;
-  const { group, mesh, outline, crown, scoreSprite } = createPlayerVisual(color, shape, data.name, data.skinImage);
+  const { group, mesh, outline, crown, scoreSprite } = createPlayerVisual(color, shape, data.name, data.skinImage, data.model);
   group.position.set(data.x, data.y, data.z);
   remotePlayers.set(data.id, group);
   remoteMeshes.set(data.id, mesh);
@@ -2728,8 +3017,6 @@ socket.on('levelChanged', (level) => {
   if (!gameStarted) {
     for (const p of levelPreviews) p.wrapper.classList.toggle('selected', p.filename === level);
     if (menuOverlay) menuOverlay.style.display = 'block';
-      const selectDiv = document.getElementById('level-select');
-      if (selectDiv) selectDiv.style.display = 'none';
   }
   if (currentLevelName !== level || !levelLoaded) loadGameLevel(level);
 });
@@ -3633,9 +3920,8 @@ function animate() {
               const bType = godmode ? godmodeBuildType : item;
               socket.emit('placeBuild', { type: bType, ...buildTarget });
               if (!godmode) {
-                inventory[0].ammo--;
-                updateInventoryUI();
-                if (inventory[0].ammo <= 0) { shiftInventory(bType, null); isDraggingBuild = false; }
+                useAmmo();
+                if (inventory.length === 0 || inventory[0].type !== bType) isDraggingBuild = false;
               }
             }
           }
@@ -3914,6 +4200,47 @@ function animate() {
     sunLight.target.position.copy(camera.position);
 
     checkInactivity();
+  }
+
+  // Update player animation mixers
+  for (const [group, mixer] of playerAnimMixers) {
+    mixer.update(delta);
+  }
+
+  // Switch local player between walk/idle, face movement, scale anim speed
+  if (localPlayer && localPlayer.userData.animations && localBody) {
+    const vx = localBody.velocity.x, vz = localBody.velocity.z;
+    const speed = Math.sqrt(vx * vx + vz * vz);
+    const wantAnim = speed > 1.5 ? 'walk' : 'idle';
+    const mixer = playerAnimMixers.get(localPlayer);
+    if (mixer) {
+      if (localPlayer.userData.currentAnim !== wantAnim) {
+        const oldClip = localPlayer.userData.animations[localPlayer.userData.currentAnim];
+        const newClip = localPlayer.userData.animations[wantAnim];
+        if (newClip) {
+          if (oldClip) mixer.clipAction(oldClip).fadeOut(0.2);
+          const action = mixer.clipAction(newClip).reset().fadeIn(0.2);
+          action.play();
+          localPlayer.userData.currentAnim = wantAnim;
+        }
+      }
+      // Scale walk animation speed with movement speed
+      if (wantAnim === 'walk') {
+        const walkClip = localPlayer.userData.animations['walk'];
+        if (walkClip) {
+          mixer.clipAction(walkClip).timeScale = Math.max(0.5, speed / 9);
+        }
+      }
+    }
+    // Rotate rat pivot to face movement direction
+    if (speed > 1.5 && localPlayer.userData.ratPivot) {
+      const targetAngle = Math.atan2(vx, vz);
+      const pivot = localPlayer.userData.ratPivot;
+      let diff = targetAngle - pivot.rotation.y;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      pivot.rotation.y += diff * Math.min(1, delta * 10);
+    }
   }
 
   renderer.render(scene, camera);

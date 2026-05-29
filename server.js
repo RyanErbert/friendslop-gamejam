@@ -14,6 +14,7 @@ app.use('/levels', express.static(path.join(__dirname, 'levels')));
 app.use('/music', express.static(path.join(__dirname, 'music')));
 app.use('/sound', express.static(path.join(__dirname, 'sound')));
 app.use('/prefabs', express.static(path.join(__dirname, 'prefabs')));
+app.use('/players', express.static(path.join(__dirname, 'players')));
 
 let activeLevel = 'level_1.glb';
 let levelLocked = false;
@@ -169,14 +170,15 @@ io.on('connection', (socket) => {
     const color = data.skinColor || COLORS[colorIndex % COLORS.length];
     if (!data.skinColor) colorIndex++;
     
-    players[socket.id] = { 
-      x: sp.x, y: sp.y, z: sp.z, 
-      color, 
-      type: data.type === 'ball' ? 'ball' : (data.shape || 'box'), 
-      name: (typeof data.name === 'string' ? data.name.slice(0, 16) : 'Player') || 'Player', 
-      shape: data.shape || 'box', 
-      skinColor: color, 
-      skinImage: typeof data.skinImage === 'string' ? data.skinImage.slice(0, 500) : '' 
+    players[socket.id] = {
+      x: sp.x, y: sp.y, z: sp.z,
+      color,
+      type: data.type === 'ball' ? 'ball' : (data.shape || 'box'),
+      name: (typeof data.name === 'string' ? data.name.slice(0, 16) : 'Player') || 'Player',
+      shape: data.shape || 'box',
+      skinColor: color,
+      skinImage: typeof data.skinImage === 'string' ? data.skinImage.slice(0, 500) : '',
+      model: typeof data.model === 'string' ? data.model : 'none'
     };
     scores[socket.id] = 0;
     readyIds.add(socket.id);
