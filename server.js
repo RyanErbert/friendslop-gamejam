@@ -16,6 +16,7 @@ app.use('/sound', express.static(path.join(__dirname, 'sound')));
 app.use('/prefabs', express.static(path.join(__dirname, 'prefabs')));
 
 let activeLevel = 'level_1.glb';
+let levelLocked = false;
 
 app.get('/api/levels', (req, res) => {
   try {
@@ -27,7 +28,7 @@ app.get('/api/levels', (req, res) => {
 });
 
 app.get('/api/game-state', (req, res) => {
-  res.json({ playerCount: readyIds.size, activeLevel });
+  res.json({ playerCount: readyIds.size, activeLevel, levelLocked });
 });
 
 const players = {};
@@ -74,7 +75,7 @@ function randomSpawn() { const pts = getSpawnPoints(); return pts[Math.floor(Mat
 const pedestals = [];
 const ITEMS_BY_CATEGORY = {
   green: ['grapple', 'launch_pad', 'boost_pad', 'teleporter'],
-  red: ['machinegun', 'rocket', 'mines', 'timed_bomb'],
+  red: ['machinegun', 'rocket', 'mines'],
   yellow: ['wall', 'ramp', 'platform']
 };
 
@@ -156,6 +157,7 @@ io.on('connection', (socket) => {
       const othersReady = [...readyIds].filter(id => id !== socket.id).length;
       if (othersReady === 0) {
         activeLevel = level;
+          levelLocked = true;
         io.emit('levelChanged', activeLevel);
       }
     }
@@ -254,7 +256,10 @@ io.on('connection', (socket) => {
         const coin = {
           id: Date.now().toString(36) + Math.random().toString(36).substr(2),
           x: players[targetId].x, y: players[targetId].y + 1, z: players[targetId].z,
-          vx: dir.x * 20 + (Math.random() - 0.5) * 15, vy: Math.max(dir.y * 20, 8) + Math.random() * 10, vz: dir.z * 20 + (Math.random() - 0.5) * 15,
+          vx: dir.x * 20 + (Math.random() - 0.5) * 20, 
+          vy: Math.max(dir.y * 20, 10) + Math.random() * 15, 
+          vz: dir.z * 20 + (Math.random() - 0.5) * 20,
+          rx: (Math.random() - 0.5) * 20, ry: (Math.random() - 0.5) * 20, rz: (Math.random() - 0.5) * 20,
           value: 1, createdAt: Date.now()
         };
         activeCoins.push(coin);
@@ -297,9 +302,10 @@ io.on('connection', (socket) => {
             const coin = {
               id: coinId,
               x: player.x, y: player.y + 1, z: player.z,
-              vx: (dx / dist + (Math.random() - 0.5)) * 8,
-              vy: 8 + Math.random() * 6,
-              vz: (dz / dist + (Math.random() - 0.5)) * 8,
+              vx: (dx / dist) * 15 + (Math.random() - 0.5) * 20,
+              vy: 10 + Math.random() * 15,
+              vz: (dz / dist) * 15 + (Math.random() - 0.5) * 20,
+              rx: (Math.random() - 0.5) * 20, ry: (Math.random() - 0.5) * 20, rz: (Math.random() - 0.5) * 20,
               value: i === coinsToSpawn - 1 ? pointsLost - (coinsToSpawn - 1) : 1,
               createdAt: Date.now()
             };
@@ -369,6 +375,7 @@ io.on('connection', (socket) => {
     readyIds.delete(socket.id);
     delete lastActivity[socket.id];
     if (holderID === socket.id) pickRandomHolder();
+    if (readyIds.size === 0) levelLocked = false;
     io.emit('playerDisconnected', socket.id);
   });
 });

@@ -1,3 +1,5 @@
+const GAME_VERSION = 'ALPHA 0.1.01';
+
 const LEVEL_SPAWN_POINTS = {
   'level_1.glb': [
     { x: -39.64, y: 0.53, z: -31.33 },
@@ -57,6 +59,7 @@ scene.background = new THREE.Color(0x000000);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
+renderer.domElement.style.cssText = 'position:fixed;top:0;left:0;z-index:1;';
 document.body.appendChild(renderer.domElement);
 
 const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
@@ -308,6 +311,7 @@ const activeParticles = [];
 const worldPads = [];
 const trailGeo = new THREE.SphereGeometry(0.6, 6, 6);
 const trailMat = new THREE.MeshBasicMaterial({ color: 0xdddddd, transparent: true, opacity: 0.8 });
+const activeExplosions = [];
 
 // --- Inventory HUD ---
 const inventoryHud = document.createElement('div');
@@ -317,7 +321,7 @@ document.body.appendChild(inventoryHud);
 
 function getColorForItem(item) {
   if (['grapple', 'launch_pad', 'boost_pad', 'teleporter'].includes(item)) return '#44ff44';
-  if (['machinegun', 'rocket', 'mines', 'timed_bomb'].includes(item)) return '#ff4444';
+  if (['machinegun', 'rocket', 'mines'].includes(item)) return '#ff4444';
   if (['wall', 'ramp', 'platform'].includes(item)) return '#ffff44';
   return '#ffffff';
 }
@@ -325,7 +329,8 @@ function getColorForItem(item) {
 function updateInventoryUI() {
   inventoryHud.innerHTML = '';
   if (!gameStarted) return;
-  inventory.forEach((item, index) => {
+  inventory.forEach((invObj, index) => {
+    const item = invObj.type;
     const isMain = index === 0;
     const size = isMain ? 80 : 50;
     const slot = document.createElement('div');
@@ -339,14 +344,44 @@ function updateInventoryUI() {
       transition: all 0.2s ease-in-out;
       transform: none; opacity: 1;
     `;
-    slot.innerHTML = `<div>${item.replace('_', ' ')}</div>`;
+    slot.innerHTML = `<div>${item.replace('_', ' ')}</div>${invObj.ammo > 0 ? `<div style="font-size:16px;margin-top:4px;color:#ff4444">${invObj.ammo}</div>` : ''}`;
     inventoryHud.appendChild(slot);
   });
 }
 
+function getAimPoint(ndc, isWeapon) {
+  const ray = new THREE.Raycaster();
+  ray.setFromCamera(ndc, camera);
+  const targets = [...levelMeshes];
+  if (isWeapon) {
+    targets.push(...pedestalMeshes);
+    for (const p of worldPads) targets.push(p.mesh);
+    for (const [id, group] of remotePlayers) targets.push(group);
+  }
+  const hits = ray.intersectObjects(targets, true);
+  return hits.length > 0 ? hits[0].point : null;
+}
+
+function shiftInventory(item, targetPt) {
+  inventory.shift();
+  console.log(`Consumed ${item} aimed at`, targetPt);
+
+  const firstSlot = inventoryHud.children[0];
+  if (firstSlot) {
+    firstSlot.style.transform = 'scale(0.5) translateX(-50px)';
+    firstSlot.style.opacity = '0';
+    for (let i = 1; i < inventoryHud.children.length; i++) {
+      inventoryHud.children[i].style.transform = 'translateX(-60px) scale(1.6)';
+    }
+    setTimeout(updateInventoryUI, 200);
+  } else {
+    updateInventoryUI();
+  }
+}
+
 function consumeItem(targetPt) {
   if (inventory.length === 0) return;
-  const item = inventory[0];
+  const item = inventory[0].type;
 
   if (item === 'grapple') {
     if (!targetPt) return; // Require a valid 3D target surface
@@ -379,44 +414,78 @@ function consumeItem(targetPt) {
     }
   } else if (item === 'rocket') {
     if (!targetPt || !localBody) return;
-    const origin = new THREE.Vector3().copy(localBody.position).add(new THREE.Vector3(0, 1.0, 0));
-    const ray = new THREE.Raycaster();
-    const ndc = isMobile ? new THREE.Vector2(0,0) : lastMouseNDC;
-    ray.setFromCamera(ndc, camera);
-    const dirToTarget = ray.ray.direction.clone().normalize();
-    const start = origin.clone().addScaledVector(dirToTarget, 2.0);
-    const target = start.clone().addScaledVector(dirToTarget, 100);
-    const t = 100 / 60; // Flight time (60 units/sec)
-    const velocity = { x: (target.x - start.x) / t, y: ((target.y - start.y) - 0.5 * -20 * t * t) / t, z: (target.z - start.z) / t };
-    socket.emit('fireRocket', { start, velocity });
-  } else if (item === 'machinegun') {
-    if (!targetPt || !localBody) return;
-    let bullets = 6;
-    const mgInt = setInterval(() => {
-      if (!localBody) { clearInterval(mgInt); return; }
-      const origin = new THREE.Vector3().copy(localBody.position).add(new THREE.Vector3(0, 1.0, 0));
-      const noisyTarget = targetPt.clone().add(new THREE.Vector3((Math.random()-0.5)*3, (Math.random()-0.5)*3, (Math.random()-0.5)*3));
-      const dir = new THREE.Vector3().subVectors(noisyTarget, origin).normalize();
-      const start = origin.clone().addScaledVector(dir, 1.5);
-      socket.emit('fireMachinegun', { start, velocity: dir.multiplyScalar(200) });
-      bullets--;
-      if (bullets <= 0) clearInterval(mgInt);
-    }, 80);
-  }
-
-  inventory.shift();
-  console.log(`Consumed ${item} aimed at`, targetPt);
-
-  const firstSlot = inventoryHud.children[0];
-  if (firstSlot) {
-    firstSlot.style.transform = 'scale(0.5) translateX(-50px)';
-    firstSlot.style.opacity = '0';
-    for (let i = 1; i < inventoryHud.children.length; i++) {
-      inventoryHud.children[i].style.transform = 'translateX(-60px) scale(1.6)';
+    let finalTarget;
+    if (targetPt) {
+      finalTarget = targetPt.clone();
+    } else {
+      const ray = new THREE.Raycaster();
+      const ndc = isMobile ? new THREE.Vector2(0,0) : lastMouseNDC;
+      ray.setFromCamera(ndc, camera);
+      finalTarget = camera.position.clone().addScaledVector(ray.ray.direction, 100);
     }
-    setTimeout(updateInventoryUI, 200);
-  } else {
+
+    const origin = new THREE.Vector3().copy(localBody.position).add(new THREE.Vector3(0, 1.0, 0));
+    const dirToTarget = new THREE.Vector3().subVectors(finalTarget, origin).normalize();
+    const start = origin.clone().addScaledVector(dirToTarget, 2.0);
+    let dist = start.distanceTo(finalTarget);
+    
+    // Force distance forward to prevent instant self-kills when looking straight down
+    if (dist < 15) {
+      finalTarget = start.clone().addScaledVector(dirToTarget, 15);
+      dist = 15;
+    } else if (dist > 60) {
+      finalTarget = start.clone().addScaledVector(dirToTarget, 60);
+      dist = 60;
+    }
+
+    const t = dist / 60; // Flight time (60 units/sec)
+    const velocity = { x: (finalTarget.x - start.x) / t, y: ((finalTarget.y - start.y) - 0.5 * -20 * t * t) / t, z: (finalTarget.z - start.z) / t };
+    socket.emit('fireRocket', { start, velocity });
+  }
+  
+  shiftInventory(item, targetPt);
+}
+
+let machinegunInterval = null;
+
+function startMachinegun() {
+  if (machinegunInterval) return;
+  machinegunInterval = setInterval(() => {
+    if (!localBody || inventory.length === 0 || inventory[0].type !== 'machinegun') { stopMachinegun(); return; }
+    const ndc = isMobile ? new THREE.Vector2(0,0) : lastMouseNDC;
+    const targetPt = getAimPoint(ndc, true);
+    let finalTarget;
+    if (targetPt) {
+      finalTarget = targetPt.clone();
+    } else {
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(ndc, camera);
+      finalTarget = camera.position.clone().addScaledVector(ray.ray.direction, 100);
+    }
+    const origin = new THREE.Vector3().copy(localBody.position).add(new THREE.Vector3(0, 1.0, 0));
+    const baseDir = new THREE.Vector3().subVectors(finalTarget, origin).normalize();
+    
+    const noisyDir = baseDir.clone();
+    noisyDir.x += (Math.random() - 0.5) * 0.08;
+    noisyDir.y += (Math.random() - 0.5) * 0.08;
+    noisyDir.z += (Math.random() - 0.5) * 0.08;
+    noisyDir.normalize();
+
+    const start = origin.clone().addScaledVector(noisyDir, 1.5);
+    socket.emit('fireMachinegun', { start, velocity: noisyDir.multiplyScalar(200) });
+    inventory[0].ammo--;
     updateInventoryUI();
+    if (inventory[0].ammo <= 0) {
+      stopMachinegun();
+      shiftInventory('machinegun', null);
+    }
+  }, 80);
+}
+
+function stopMachinegun() {
+  if (machinegunInterval) {
+    clearInterval(machinegunInterval);
+    machinegunInterval = null;
   }
 }
 
@@ -457,6 +526,16 @@ const jumpSounds = [
 ];
 const JUMP_SOUND_BASE_VOLUME = 0.5;
 
+const bombSounds = [
+  new Audio('/sound/bomb_1.wav'),
+  new Audio('/sound/bomb_2.wav'),
+  new Audio('/sound/bomb_3.wav'),
+  new Audio('/sound/bomb_4.wav'),
+  new Audio('/sound/bomb_5.wav'),
+  new Audio('/sound/bomb_6.wav'),
+];
+const BOMB_SOUND_BASE_VOLUME = 2.0;
+
 const MAX_SOUND_DIST = 50;
 
 function playWorldSound(sound, position, baseVolume = 1.0) {
@@ -477,6 +556,11 @@ function playWorldSound(sound, position, baseVolume = 1.0) {
 function playRandomJumpSound(position) {
   const sound = jumpSounds[Math.floor(Math.random() * jumpSounds.length)];
   playWorldSound(sound, position, JUMP_SOUND_BASE_VOLUME);
+}
+
+function playRandomBombSound(position) {
+  const sound = bombSounds[Math.floor(Math.random() * bombSounds.length)];
+  playWorldSound(sound, position, BOMB_SOUND_BASE_VOLUME);
 }
 
 // --- Inactivity timeout ---
@@ -520,6 +604,7 @@ function returnToMenu() {
   scoreboardEl.style.display = 'none';
   debugEl.style.display = 'none';
   debugVisible = false;
+  if (menuOverlay) menuOverlay.style.display = 'block';
   inactivityBanner.style.display = 'none';
   inactivityWarningShown = false;
   sprintMeter.wrap.style.display = 'none';
@@ -566,6 +651,11 @@ function returnToMenu() {
 
   for (const p of worldPads) scene.remove(p.mesh);
   worldPads.length = 0;
+
+  for (const ex of activeExplosions) scene.remove(ex.mesh);
+  activeExplosions.length = 0;
+
+  if (machinegunInterval) { clearInterval(machinegunInterval); machinegunInterval = null; }
 
   updateInventoryUI();
 
@@ -632,8 +722,15 @@ gmToolStyle.textContent = `
   .gm-tool { transition: background 0.15s; }
   .gm-tool:hover { background: rgba(255,255,255,0.15); }
   .gm-tool.selected { background: rgba(68,136,255,0.4); border-left: 3px solid #4488ff; }
+  #name-screen, #level-select, #title-canvas, #cube-preview { position:relative; z-index:10; }
+  #name-screen, #name-screen *:not(input):not(button) { background: transparent !important; background-color: transparent !important; box-shadow: none !important; border: none !important; backdrop-filter: none !important; }
 `;
 document.head.appendChild(gmToolStyle);
+
+const menuOverlay = document.createElement('div');
+menuOverlay.id = 'menu-overlay';
+menuOverlay.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);pointer-events:none;z-index:5;display:none;';
+document.body.appendChild(menuOverlay);
 
 godmodeMenu.addEventListener('click', (e) => {
   e.stopPropagation();
@@ -926,6 +1023,12 @@ let gameStarted = false;
 (async function initTitle() {
   const tc = document.getElementById('title-canvas');
   if (!tc) return;
+
+  const versionDiv = document.createElement('div');
+  versionDiv.textContent = GAME_VERSION;
+  versionDiv.style.cssText = 'color:#aaa; font:10px "04b_03", Lato, sans-serif; letter-spacing:1px; margin-top:-40px; margin-bottom:30px; text-align:center; position:relative; z-index:10;';
+  tc.parentNode.insertBefore(versionDiv, tc.nextSibling);
+
   try { await document.fonts.load("8px '04b_03'"); } catch(e) {}
   const ctx = tc.getContext('2d');
   ctx.imageSmoothingEnabled = false;
@@ -998,6 +1101,8 @@ let gameStarted = false;
   const existingCustomizeBtn = Array.from(document.querySelectorAll('*')).find(el => el.childNodes.length === 1 && el.textContent.trim().toUpperCase() === 'CUSTOMIZE CHARACTER');
   if (existingCustomizeBtn) {
     existingCustomizeBtn.style.cursor = 'pointer';
+    existingCustomizeBtn.style.position = 'relative';
+    existingCustomizeBtn.style.zIndex = '10';
     existingCustomizeBtn.addEventListener('click', () => colorPicker.click());
   }
 
@@ -1017,6 +1122,7 @@ function joinGame() {
   playerColor = colorPicker.value;
   playerSkinImage = '';
   nameScreen.style.display = 'none';
+  if (menuOverlay) menuOverlay.style.display = 'none';
   hud.style.display = '';
   hud.style.opacity = '1';
   hud.style.transition = 'opacity 1s ease-in-out';
@@ -1038,7 +1144,7 @@ function joinGame() {
   // Load the selected or active level
   const levelToLoad = selectedLevel || serverActiveLevel || 'level_1.glb';
   socket.emit('selectLevel', levelToLoad);
-  loadGameLevel(levelToLoad);
+  if (currentLevelName !== levelToLoad || !levelLoaded) loadGameLevel(levelToLoad);
   cleanupPreviews();
 
   gameStarted = true;
@@ -1139,10 +1245,13 @@ async function initLevelSelect() {
     serverActiveLevel = stateRes.activeLevel;
     selectedLevel = serverActiveLevel;
 
+    loadGameLevel(serverActiveLevel);
+    if (menuOverlay) menuOverlay.style.display = 'block';
+
     const selectDiv = document.getElementById('level-select');
     if (!selectDiv) return;
 
-    if (stateRes.playerCount > 0) {
+    if (stateRes.playerCount > 0 || stateRes.levelLocked) {
       selectDiv.style.display = 'none';
       return;
     }
@@ -1166,6 +1275,7 @@ async function initLevelSelect() {
         for (const p of levelPreviews) {
           p.wrapper.classList.toggle('selected', p.filename === filename);
         }
+        socket.emit('selectLevel', filename);
       });
 
       if (filename === selectedLevel) {
@@ -1366,6 +1476,10 @@ if (isMobile) {
     camTouchStartX = t.clientX;
     camTouchStartY = t.clientY;
     camTouchStartTime = performance.now();
+
+    if (!godmode && inventory.length > 0 && inventory[0].type === 'machinegun') {
+      startMachinegun();
+    }
   });
   window.addEventListener('touchmove', (e) => {
     if (camTouchId === null) return;
@@ -1381,17 +1495,17 @@ if (isMobile) {
     lastMouseMoveTime = performance.now() / 1000;
   }, { passive: true });
   window.addEventListener('touchend', (e) => {
+    stopMachinegun();
     const t = findTouch(e.changedTouches, camTouchId);
     if (t) {
       camTouchId = null;
       const dist = Math.hypot(t.clientX - camTouchStartX, t.clientY - camTouchStartY);
       if (dist < 10 && performance.now() - camTouchStartTime < 300) {
-        if (!godmode && inventory.length > 0) {
-          const consumeRay = new THREE.Raycaster();
+        if (!godmode && inventory.length > 0 && inventory[0].type !== 'machinegun') {
           const ndc = new THREE.Vector2((t.clientX / window.innerWidth) * 2 - 1, -(t.clientY / window.innerHeight) * 2 + 1);
-          consumeRay.setFromCamera(ndc, camera);
-          const hits = consumeRay.intersectObjects(levelMeshes, false);
-          consumeItem(hits.length > 0 ? hits[0].point : null);
+          const item = inventory[0].type;
+          const isWeapon = ['rocket', 'machinegun', 'grapple'].includes(item);
+          consumeItem(getAimPoint(ndc, isWeapon));
         }
       }
     }
@@ -1821,9 +1935,13 @@ renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
 
 renderer.domElement.addEventListener('mousedown', (e) => {
   if (e.button === 2) mouseDragging = true;
+  if (e.button === 0 && !godmode && inventory.length > 0 && inventory[0].type === 'machinegun') {
+    startMachinegun();
+  }
 });
 window.addEventListener('mouseup', (e) => {
   if (e.button === 2) mouseDragging = false;
+  if (e.button === 0) stopMachinegun();
 });
 
 document.addEventListener('mousemove', (e) => {
@@ -1886,12 +2004,11 @@ function hideSpawnMarkers() {
 
 renderer.domElement.addEventListener('click', (e) => {
   if (!godmode) {
-    if (inventory.length > 0) {
-      const consumeRay = new THREE.Raycaster();
+    if (inventory.length > 0 && inventory[0].type !== 'machinegun') {
       const ndc = new THREE.Vector2((e.clientX / window.innerWidth) * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1);
-      consumeRay.setFromCamera(ndc, camera);
-      const hits = consumeRay.intersectObjects(levelMeshes, false);
-      consumeItem(hits.length > 0 ? hits[0].point : null);
+      const item = inventory[0].type;
+      const isWeapon = ['rocket', 'machinegun', 'grapple'].includes(item);
+      consumeItem(getAimPoint(ndc, isWeapon));
     }
     return;
   }
@@ -2269,7 +2386,15 @@ socket.on('scores', (s) => {
 });
 
 socket.on('levelChanged', (level) => {
-  if (gameStarted) loadGameLevel(level);
+  serverActiveLevel = level;
+  selectedLevel = level;
+  if (!gameStarted) {
+    for (const p of levelPreviews) p.wrapper.classList.toggle('selected', p.filename === level);
+    if (menuOverlay) menuOverlay.style.display = 'block';
+      const selectDiv = document.getElementById('level-select');
+      if (selectDiv) selectDiv.style.display = 'none';
+  }
+  if (currentLevelName !== level || !levelLoaded) loadGameLevel(level);
 });
 
 socket.on('kicked', () => {
@@ -2306,7 +2431,7 @@ socket.on('pedestalsUpdated', (peds) => {
 
 socket.on('itemPickedUp', (item) => {
   if (inventory.length < MAX_INVENTORY) {
-    inventory.push(item);
+    inventory.push({ type: item, ammo: item === 'machinegun' ? 100 : 0 });
     console.log(`Picked up ${item}! Inventory:`, inventory);
     updateInventoryUI();
   }
@@ -2371,6 +2496,7 @@ socket.on('machinegunFired', (data) => {
 socket.on('applyImpulse', (data) => {
   if (data.id === selfId && localBody) {
     localBody.wakeUp();
+    localBody.position.y += 0.1; // Pop off ground to break friction
     localBody.velocity.x += data.dir.x * data.force;
     localBody.velocity.y += data.dir.y * data.force;
     localBody.velocity.z += data.dir.z * data.force;
@@ -2398,30 +2524,25 @@ socket.on('explosion', (pos) => {
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.copy(p);
   scene.add(mesh);
-  playWorldSound(boostSound, p, 2.0); // Reuse boost sound for now
+  playRandomBombSound(p);
+  activeExplosions.push({ mesh, life: 0.5, maxLife: 0.5 });
 
   if (localPlayer && localBody) {
     const dist = localPlayer.position.distanceTo(p);
     if (dist < 8) {
       const dir = new THREE.Vector3().subVectors(localPlayer.position, p).normalize();
-      dir.y += 1.5; dir.normalize(); // Angle knockback upwards
-      const force = (8 - dist) * 20;
+        dir.y = Math.max(0.5, dir.y + 1.0); // Force it upwards significantly
+        dir.normalize(); 
+        const force = (8 - dist) * 12; // Max force 96 for dramatic knockback
       localBody.wakeUp(); // Ensure physics engine registers the hit
+        localBody.position.y += 0.5; // Pop well off the ground to break friction instantly
       localBody.velocity.x += dir.x * force;
-      localBody.velocity.y += dir.y * force;
+        localBody.velocity.y = Math.max(localBody.velocity.y, 0) + dir.y * force;
       localBody.velocity.z += dir.z * force;
       const hSpeedAfter = Math.sqrt(localBody.velocity.x ** 2 + localBody.velocity.z ** 2);
       speedCapCurrent = Math.max(speedCapCurrent, hSpeedAfter);
     }
   }
-
-  let scale = 1;
-  const anim = setInterval(() => {
-    scale += 0.2;
-    mesh.scale.set(scale, scale, scale);
-    mesh.material.opacity -= 0.05;
-    if (mesh.material.opacity <= 0) { clearInterval(anim); scene.remove(mesh); }
-  }, 30);
 });
 
 function addMineToWorld(m) {
@@ -2447,9 +2568,7 @@ socket.on('coinsDropped', (coins) => {
     });
     body.position.set(c.x, c.y, c.z);
     body.velocity.set(c.vx, c.vy, c.vz);
-    const q = new CANNON.Quaternion();
-    q.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), Math.PI / 2);
-    body.quaternion = q;
+    body.angularVelocity.set(c.rx || 0, c.ry || 0, c.rz || 0);
     world.addBody(body);
     const geo = new THREE.CylinderGeometry(0.3, 0.3, 0.1, 16);
     geo.rotateX(Math.PI / 2);
@@ -2510,8 +2629,35 @@ function handleGodmode(delta) {
 let debugVisible = false;
 const debugEl = document.createElement('div');
 debugEl.id = 'debug-hud';
-debugEl.style.cssText = 'position:absolute;top:10px;right:10px;color:white;font:12px "04b_03",Lato,sans-serif;background:rgba(0,0,0,0.8);border:1px solid rgba(255,255,255,0.3);padding:10px;border-radius:8px;white-space:pre;display:none;pointer-events:none;z-index:30;';
+debugEl.style.cssText = 'position:absolute;top:10px;right:10px;width:300px;color:#0f0;font:12px "04b_03",Lato,sans-serif;background:rgba(0,0,0,0.8);border:2px solid #0f0;padding:10px;border-radius:8px;white-space:pre;display:none;pointer-events:none;z-index:30;';
 document.body.appendChild(debugEl);
+
+// --- Debug Projectile Visuals ---
+const debugLineGeo = new THREE.BufferGeometry();
+const debugLineMat = new THREE.LineBasicMaterial({ color: 0x00ff00 });
+const debugAimLine = new THREE.Line(debugLineGeo, debugLineMat);
+debugAimLine.visible = false;
+scene.add(debugAimLine);
+
+const debugArcGeo = new THREE.BufferGeometry();
+const debugArcMat = new THREE.LineBasicMaterial({ color: 0xffa500 });
+const debugArcLine = new THREE.Line(debugArcGeo, debugArcMat);
+debugArcLine.visible = false;
+scene.add(debugArcLine);
+
+const debugDistCanvas = document.createElement('canvas');
+debugDistCanvas.width = 128; debugDistCanvas.height = 64;
+const debugDistCtx = debugDistCanvas.getContext('2d');
+const debugDistTex = new THREE.CanvasTexture(debugDistCanvas);
+const debugDistMat = new THREE.SpriteMaterial({ map: debugDistTex, depthTest: false });
+const debugDistSprite = new THREE.Sprite(debugDistMat);
+debugDistSprite.scale.set(3, 1.5, 1);
+debugDistSprite.visible = false;
+scene.add(debugDistSprite);
+
+const debugCrosshair = document.createElement('div');
+debugCrosshair.style.cssText = 'position:absolute;width:16px;height:16px;border:2px solid #0f0;border-radius:50%;transform:translate(-50%,-50%);pointer-events:none;z-index:9999;display:none;';
+document.body.appendChild(debugCrosshair);
 
 window.addEventListener('keydown', (e) => {
   if (e.code === 'Backquote') {
@@ -2621,12 +2767,72 @@ function rebuildLocalRoundcube() {
 let fpsFrames = 0, fpsTime = 0, fpsDisplay = 0;
 
 function updateDebug(delta) {
-  if (!debugVisible) return;
+  if (!debugVisible) {
+    debugAimLine.visible = false;
+    debugArcLine.visible = false;
+    debugDistSprite.visible = false;
+    debugCrosshair.style.display = 'none';
+    return;
+  }
 
   gimbal.quaternion.copy(camera.quaternion).invert();
 
   fpsFrames++; fpsTime += delta;
   if (fpsTime >= 0.5) { fpsDisplay = Math.round(fpsFrames / fpsTime); fpsFrames = 0; fpsTime = 0; }
+
+  if (localBody) {
+    const ndc = isMobile ? new THREE.Vector2(0,0) : lastMouseNDC;
+    const targetPt = getAimPoint(ndc, true);
+    const origin = new THREE.Vector3().copy(localBody.position).add(new THREE.Vector3(0, 1.0, 0));
+    let finalTarget;
+    if (targetPt) finalTarget = targetPt.clone();
+    else {
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(ndc, camera);
+      finalTarget = camera.position.clone().addScaledVector(ray.ray.direction, 100);
+    }
+
+    const dist = origin.distanceTo(finalTarget);
+    debugAimLine.geometry.setFromPoints([origin, finalTarget]);
+    debugAimLine.visible = true;
+
+    const mid = origin.clone().lerp(finalTarget, 0.5);
+    debugDistSprite.position.copy(mid);
+    debugDistSprite.visible = true;
+    debugDistCtx.clearRect(0, 0, 128, 64);
+    debugDistCtx.font = '24px "04b_03", Lato, sans-serif';
+    debugDistCtx.fillStyle = '#0f0';
+    debugDistCtx.textAlign = 'center';
+    debugDistCtx.fillText(dist.toFixed(1) + 'm', 64, 32);
+    debugDistTex.needsUpdate = true;
+
+    debugCrosshair.style.display = '';
+    debugCrosshair.style.left = ((ndc.x + 1) / 2 * window.innerWidth) + 'px';
+    debugCrosshair.style.top = (-(ndc.y - 1) / 2 * window.innerHeight) + 'px';
+
+    const dirToTarget = new THREE.Vector3().subVectors(finalTarget, origin).normalize();
+    const start = origin.clone().addScaledVector(dirToTarget, 2.0);
+    let rDist = dist;
+    let rTarget = finalTarget.clone();
+    if (rDist < 15) { rTarget = start.clone().addScaledVector(dirToTarget, 15); rDist = 15; }
+    else if (rDist > 60) { rTarget = start.clone().addScaledVector(dirToTarget, 60); rDist = 60; }
+    
+    const t = rDist / 60;
+    const vY = ((rTarget.y - start.y) - 0.5 * -20 * t * t) / t;
+    const velocity = new THREE.Vector3((rTarget.x - start.x) / t, vY, (rTarget.z - start.z) / t);
+
+    const arcPoints = [];
+    for (let i = 0; i <= 20; i++) {
+      const simT = (i / 20) * t;
+      arcPoints.push(new THREE.Vector3(
+        start.x + velocity.x * simT,
+        start.y + velocity.y * simT + 0.5 * -20 * simT * simT,
+        start.z + velocity.z * simT
+      ));
+    }
+    debugArcLine.geometry.setFromPoints(arcPoints);
+    debugArcLine.visible = true;
+  }
 
   if (godmode) {
     const c = camera.position;
@@ -2675,6 +2881,17 @@ function animate() {
   const rawDelta = clock.getDelta();
   const delta = Math.min(rawDelta, 0.05);
 
+  if (!gameStarted && currentLevelObj) {
+    if (SPAWN_POINTS && SPAWN_POINTS.length > 0) {
+      const t = performance.now() / 1000;
+      const index = Math.floor(t / 8) % SPAWN_POINTS.length;
+      const sp = SPAWN_POINTS[index];
+      const angle = t * 0.15;
+      camera.position.set(sp.x + Math.cos(angle) * 15, sp.y + 6, sp.z + Math.sin(angle) * 15);
+      camera.lookAt(sp.x, sp.y + 2, sp.z);
+    }
+  }
+
   if (gameStarted && localBody) {
     if (godmode) {
       handleGodmode(delta);
@@ -2705,7 +2922,7 @@ function animate() {
 
     // Player item ghosting
     if (!godmode && inventory.length > 0 && localPlayer) {
-      const item = inventory[0];
+      const item = inventory[0].type;
       if (['mines', 'launch_pad', 'boost_pad'].includes(item)) {
         hoverRaycaster.setFromCamera(lastMouseNDC, camera);
         const hits = hoverRaycaster.intersectObjects(levelMeshes, false);
@@ -2741,6 +2958,9 @@ function animate() {
       }
     }
     if (!onTeleporter) lastTeleporterUsed = null;
+  } // End of local physics block
+
+  // --- WORLD ENTITY UPDATES (Always run, even in main menu) ---
 
     // Machine gun bullets
     for (let i = activeBullets.length - 1; i >= 0; i--) {
@@ -2807,6 +3027,23 @@ function animate() {
       }
     }
 
+    // Update explosions
+    for (let i = activeExplosions.length - 1; i >= 0; i--) {
+      const ex = activeExplosions[i];
+      ex.life -= delta;
+      if (ex.life <= 0) {
+        scene.remove(ex.mesh);
+        if (ex.mesh.material) ex.mesh.material.dispose();
+        if (ex.mesh.geometry) ex.mesh.geometry.dispose();
+        activeExplosions.splice(i, 1);
+      } else {
+        const pct = ex.life / ex.maxLife; // 1 to 0
+        const scale = 1 + (1 - pct) * 5; 
+        ex.mesh.scale.setScalar(scale);
+        ex.mesh.material.opacity = pct;
+      }
+    }
+
     // Mines
     if (localPlayer) {
       for (const m of worldMines) if (localPlayer.position.distanceTo(m.pos) < 1.2) socket.emit('triggerMine', m.id);
@@ -2843,6 +3080,8 @@ function animate() {
       }
     }
 
+  if (gameStarted && localBody) {
+
     if (checkGrounded()) {
       airTime = 0;
     } else {
@@ -2855,6 +3094,9 @@ function animate() {
       localBody.angularVelocity.set(0, 0, 0);
       airTime = 0;
     }
+  }
+
+  // --- Remote player interpolation (Always run, even in main menu) ---
 
     for (const [id, target] of remoteTargets) {
       const group = remotePlayers.get(id);
@@ -2902,6 +3144,8 @@ function animate() {
         }
       }
     }
+
+  if (gameStarted && localBody) {
 
     // Pads
     if (localPlayer && localBody) {
