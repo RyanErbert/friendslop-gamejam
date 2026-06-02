@@ -440,8 +440,20 @@ function updateGroundPlane(body) {
   const groundHit = raycastLevel(groundOrigin, new THREE.Vector3(0, -1, 0), 50);
 
   if (groundHit) {
-    groundBody.position.y = groundHit.point.y;
-    rayGrounded = (p.y - groundHit.point.y) < 0.95;
+    const surfaceY = groundHit.point.y;
+    groundBody.position.y = surfaceY;
+    // Anti-sink backup: the Cannon ground plane doesn't reliably eject a body
+    // that is already embedded in the floor (e.g. spawned with its centre on the
+    // surface, or shoved down by the ceiling clamp). Lift it back out here.
+    // Capped to a small penetration so we never yank a player up onto a platform
+    // they are legitimately standing beneath.
+    const restY = surfaceY + PLAYER_RADIUS;
+    const penetration = restY - p.y;
+    if (penetration > 0.02 && penetration < 1.2) {
+      p.y = restY;
+      if (body.velocity.y < 0) body.velocity.y = 0;
+    }
+    rayGrounded = (p.y - surfaceY) < 0.95;
   } else {
     groundBody.position.y = -1000;
     rayGrounded = false;
@@ -501,7 +513,10 @@ function resolveWallCollisions(body) {
   }
   if (nearestCeil) {
     const clampY = nearestCeil.point.y - PLAYER_RADIUS - 0.1;
-    if (p.y > clampY) {
+    // Never let the ceiling clamp shove the player below the floor (that strands
+    // them inside the terrain). If the gap is too tight, skip the clamp.
+    const minY = groundBody.position.y + PLAYER_RADIUS;
+    if (p.y > clampY && clampY >= minY) {
       p.y = clampY;
       if (body.velocity.y > 0) body.velocity.y = 0;
     }
@@ -2279,8 +2294,10 @@ function joinGame() {
     musicPlaying = true;
   }
 
-  // Load the selected or active level
-  const levelToLoad = selectedLevel || serverActiveLevel || 'level_1.glb';
+  // Load the level. If a game is already in progress (lobby locked) we MUST use
+  // the server's active level — joining players can't bring their own map.
+  const levelToLoad = lobbyLocked ? (serverActiveLevel || 'level_1.glb')
+                                  : (selectedLevel || serverActiveLevel || 'level_1.glb');
   socket.emit('selectLevel', levelToLoad);
   if (currentLevelName !== levelToLoad || !levelLoaded) loadGameLevel(levelToLoad);
   cleanupPreviews();
@@ -2382,8 +2399,26 @@ function updateMeters() {
 // --- Level select system ---
 let selectedLevel = null;
 let serverActiveLevel = 'level_1.glb';
+let lobbyLocked = false;          // true while a game is in progress (set by server)
+let setVisibleMap = null;         // assigned by initLevelSelect; lets remote syncs swap the shown map
 const levelPreviews = [];
 let previewsActive = false;
+
+// Gray out (without removing) the game-config controls when the lobby is locked.
+// The selected option stays highlighted so everyone can see the active settings.
+function setLobbyControlsLocked(locked) {
+  lobbyLocked = !!locked;
+  document.querySelectorAll('[data-gametype], .weapon-opt, [data-duration]').forEach(el => {
+    el.style.pointerEvents = locked ? 'none' : '';
+    el.style.opacity = locked ? (el.classList.contains('selected') ? '1' : '0.35') : '';
+  });
+  const ammo = document.getElementById('infinite-ammo-check');
+  if (ammo) { ammo.disabled = locked; ammo.style.opacity = locked ? '0.5' : ''; }
+  ['map-prev', 'map-next'].forEach(id => {
+    const a = document.getElementById(id);
+    if (a) { a.style.pointerEvents = locked ? 'none' : ''; a.style.opacity = locked ? '0.25' : ''; }
+  });
+}
 
 // --- Active game panel (main menu) ---
 function prettyLevelName(f) {
@@ -2441,14 +2476,13 @@ async function initLevelSelect() {
     renderActiveGame(stateRes);
     startActiveGamePolling();
 
+    lobbyLocked = !!stateRes.levelLocked;
+
     const selectDiv = document.getElementById('level-select');
     if (!selectDiv) return;
 
-    if (stateRes.levelLocked) {
-      selectDiv.style.display = 'none';
-      return;
-    }
-
+    // The map stays VISIBLE at all times. When the lobby is locked (a game is in
+    // progress) the arrows are grayed out so the active map can't be changed.
     selectDiv.style.display = 'block';
     const single = (levelsRes.length <= 1) ? '' :
       '<div class="level-arrow" id="map-prev">◀</div>';
@@ -2467,7 +2501,9 @@ async function initLevelSelect() {
 
     let curIndex = Math.max(0, levelsRes.indexOf(selectedLevel));
 
-    function showMap(i) {
+    // emit defaults true (a deliberate local pick). Remote syncs pass false so we
+    // don't echo the change back to the server and start a tug-of-war.
+    function showMap(i, emit) {
       curIndex = (i + levelsRes.length) % levelsRes.length;
       selectedLevel = levelsRes[curIndex];
       levelPreviews.forEach((p, idx) => {
@@ -2475,15 +2511,23 @@ async function initLevelSelect() {
         p.wrapper.classList.toggle('selected', idx === curIndex);
       });
       if (nameEl) nameEl.textContent = prettyLevelName(selectedLevel);
-      socket.emit('selectLevel', selectedLevel);
+      if (emit !== false) socket.emit('selectLevel', selectedLevel);
     }
+
+    // Expose so the levelChanged socket handler can sync the shown map to match
+    // whatever another player selected, without re-emitting.
+    setVisibleMap = (filename) => {
+      const idx = levelsRes.indexOf(filename);
+      if (idx >= 0) showMap(idx, false);
+    };
 
     const prevBtn = document.getElementById('map-prev');
     const nextBtn = document.getElementById('map-next');
-    if (prevBtn) prevBtn.addEventListener('click', () => showMap(curIndex - 1));
-    if (nextBtn) nextBtn.addEventListener('click', () => showMap(curIndex + 1));
+    if (prevBtn) prevBtn.addEventListener('click', () => { if (!lobbyLocked) showMap(curIndex - 1, true); });
+    if (nextBtn) nextBtn.addEventListener('click', () => { if (!lobbyLocked) showMap(curIndex + 1, true); });
 
-    showMap(curIndex);
+    showMap(curIndex, false);
+    setLobbyControlsLocked(lobbyLocked);
 
     previewsActive = true;
     animatePreviews();
@@ -3839,10 +3883,18 @@ socket.on('levelChanged', (level) => {
   serverActiveLevel = level;
   selectedLevel = level;
   if (!gameStarted) {
-    for (const p of levelPreviews) p.wrapper.classList.toggle('selected', p.filename === level);
+    // Sync the visible map (and selection) to what the server says is active so
+    // every lobby client shows and will load the same level.
+    if (setVisibleMap) setVisibleMap(level);
+    else for (const p of levelPreviews) p.wrapper.classList.toggle('selected', p.filename === level);
     if (menuOverlay) menuOverlay.style.display = 'block';
   }
   if (currentLevelName !== level || !levelLoaded) loadGameLevel(level);
+});
+
+socket.on('lobbyLocked', (locked) => {
+  if (!gameStarted) setLobbyControlsLocked(locked);
+  else lobbyLocked = !!locked;
 });
 
 socket.on('kicked', () => {

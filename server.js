@@ -188,13 +188,13 @@ setInterval(() => {
 
 io.on('connection', (socket) => {
   socket.on('selectLevel', (level) => {
-    if (typeof level === 'string' && level.endsWith('.glb')) {
-      const othersReady = [...readyIds].filter(id => id !== socket.id).length;
-      if (othersReady === 0) {
-        activeLevel = level;
-          levelLocked = true;
-        io.emit('levelChanged', activeLevel);
-      }
+    // Once a game is in progress the level is locked and cannot change. While
+    // the lobby is open, any player's selection becomes THE active level and is
+    // broadcast to everyone so all lobby clients stay on the same map.
+    if (levelLocked) return;
+    if (typeof level === 'string' && level.endsWith('.glb') && level !== activeLevel) {
+      activeLevel = level;
+      io.emit('levelChanged', activeLevel);
     }
   });
 
@@ -216,6 +216,8 @@ io.on('connection', (socket) => {
     scores[socket.id] = 0;
     readyIds.add(socket.id);
     lastActivity[socket.id] = Date.now();
+    // First player to join locks the lobby (level + game settings) for everyone.
+    if (!levelLocked) { levelLocked = true; io.emit('lobbyLocked', true); }
     console.log(`Player connected: ${socket.id} (${players[socket.id].name}, ${players[socket.id].shape})`);
     socket.emit('currentPlayers', { players, selfId: socket.id });
     socket.emit('holderChanged', holderID);
@@ -509,7 +511,8 @@ io.on('connection', (socket) => {
     readyIds.delete(socket.id);
     delete lastActivity[socket.id];
     if (holderID === socket.id) pickRandomHolder();
-    if (readyIds.size === 0) levelLocked = false;
+    // Last player leaving re-opens the lobby for level/setting changes.
+    if (readyIds.size === 0 && levelLocked) { levelLocked = false; io.emit('lobbyLocked', false); }
     io.emit('playerDisconnected', socket.id);
   });
 });
