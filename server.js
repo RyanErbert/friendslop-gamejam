@@ -39,7 +39,11 @@ app.get('/api/models', (req, res) => {
 });
 
 app.get('/api/game-state', (req, res) => {
-  res.json({ playerCount: readyIds.size, activeLevel, levelLocked });
+  const playerList = [...readyIds]
+    .filter(id => players[id])
+    .map(id => ({ name: players[id].name, color: players[id].skinColor, score: scores[id] || 0 }))
+    .sort((a, b) => b.score - a.score);
+  res.json({ playerCount: readyIds.size, activeLevel, levelLocked, players: playerList });
 });
 
 const players = {};
@@ -77,6 +81,23 @@ const LEVEL_SPAWN_POINTS = {
     { x: -34.88, y: 161.88, z: 18.03 },
     { x: 16.88, y: 151.22, z: 22.6 },
     { x: 13.89, y: 155.79, z: -3.39 },
+  ],
+  'level_3.glb': [
+    { x: -81.52, y: -15.48, z: 22.12 },
+    { x: -140.34, y: -18.29, z: 7.88 },
+    { x: -145.72, y: 14.5, z: -21.92 },
+    { x: -120.18, y: -23.09, z: -61.03 },
+    { x: -156.08, y: -0.11, z: -116.92 },
+    { x: -136.33, y: -15.51, z: -128.25 },
+    { x: -91.79, y: -13.65, z: -107.49 },
+    { x: -91.7, y: -17.65, z: -72.68 },
+    { x: -184.28, y: -15.48, z: 52.21 },
+    { x: -179.75, y: -15.48, z: 40.45 },
+    { x: -174.78, y: -15.48, z: 50.9 },
+    { x: -117.39, y: -15.6, z: 87.12 },
+    { x: -91.7, y: -15.58, z: -26.09 },
+    { x: -196.07, y: -15.48, z: -84.23 },
+    { x: -169.17, y: -16.3, z: -6.25 },
   ],
 };
 function getSpawnPoints() { return LEVEL_SPAWN_POINTS[activeLevel] || LEVEL_SPAWN_POINTS['level_1.glb']; }
@@ -340,13 +361,17 @@ io.on('connection', (socket) => {
       scores[targetId] -= pointsLost;
       const droppedCoins = [];
       for (let i = 0; i < pointsLost; i++) {
+        const ang = Math.random() * Math.PI * 2;
+        const horiz = 6 + Math.random() * 22;
         const coin = {
           id: Date.now().toString(36) + Math.random().toString(36).substr(2),
-          x: players[targetId].x, y: players[targetId].y + 1, z: players[targetId].z,
-          vx: dir.x * 20 + (Math.random() - 0.5) * 20, 
-          vy: Math.max(dir.y * 20, 10) + Math.random() * 15, 
-          vz: dir.z * 20 + (Math.random() - 0.5) * 20,
-          rx: (Math.random() - 0.5) * 20, ry: (Math.random() - 0.5) * 20, rz: (Math.random() - 0.5) * 20,
+          x: players[targetId].x + (Math.random() - 0.5) * 0.8,
+          y: players[targetId].y + 1 + Math.random() * 0.6,
+          z: players[targetId].z + (Math.random() - 0.5) * 0.8,
+          vx: dir.x * 14 + Math.cos(ang) * horiz,
+          vy: Math.max(dir.y * 16, 8) + Math.random() * 16,
+          vz: dir.z * 14 + Math.sin(ang) * horiz,
+          rx: (Math.random() - 0.5) * 30, ry: (Math.random() - 0.5) * 30, rz: (Math.random() - 0.5) * 30,
           value: 1, createdAt: Date.now()
         };
         activeCoins.push(coin);
@@ -386,13 +411,22 @@ io.on('connection', (socket) => {
           const coinsToSpawn = Math.min(pointsLost, 15); // Cap visuals at 15
           for (let i = 0; i < coinsToSpawn; i++) {
             const coinId = Date.now().toString(36) + Math.random().toString(36).substr(2);
+            // Spray coins in every direction with widely varying speed so they
+            // scatter instead of fountaining onto one spot.
+            const ang = Math.random() * Math.PI * 2;
+            const horiz = 5 + Math.random() * 24;          // big horizontal speed spread
+            const up = 5 + Math.random() * 22;             // big vertical speed spread
+            const radial = 0.3 + Math.random() * 0.8;      // partial pull along blast dir
+            const safeDist = dist > 0.001 ? dist : 1;
             const coin = {
               id: coinId,
-              x: player.x, y: player.y + 1, z: player.z,
-              vx: (dx / dist) * 6 + (Math.random() - 0.5) * 40,
-              vy: 8 + Math.random() * 18,
-              vz: (dz / dist) * 6 + (Math.random() - 0.5) * 40,
-              rx: (Math.random() - 0.5) * 20, ry: (Math.random() - 0.5) * 20, rz: (Math.random() - 0.5) * 20,
+              x: player.x + (Math.random() - 0.5) * 0.8,
+              y: player.y + 1 + Math.random() * 0.6,
+              z: player.z + (Math.random() - 0.5) * 0.8,
+              vx: (dx / safeDist) * 5 * radial + Math.cos(ang) * horiz,
+              vy: up,
+              vz: (dz / safeDist) * 5 * radial + Math.sin(ang) * horiz,
+              rx: (Math.random() - 0.5) * 30, ry: (Math.random() - 0.5) * 30, rz: (Math.random() - 0.5) * 30,
               value: i === coinsToSpawn - 1 ? pointsLost - (coinsToSpawn - 1) : 1,
               createdAt: Date.now()
             };
@@ -453,6 +487,19 @@ io.on('connection', (socket) => {
       pedestals.splice(idx, 1);
       io.emit('pedestalRemoved', id);
     }
+  });
+
+  socket.on('chat', (text) => {
+    if (typeof text !== 'string') return;
+    const msg = text.trim().slice(0, 200);
+    if (!msg) return;
+    const p = players[socket.id];
+    io.emit('chatMessage', {
+      id: socket.id,
+      name: p ? p.name : 'Spectator',
+      color: p ? p.skinColor : '#ffffff',
+      text: msg
+    });
   });
 
   socket.on('disconnect', () => {

@@ -54,8 +54,43 @@
       letter-spacing: 2px;
       margin: 0;
     }
-    #map-panel {
-      grid-column: 1 / -1;
+    #play-panel {
+      justify-content: space-between;
+    }
+    /* Single-map selector */
+    .single-map {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+    .single-map-stage {
+      position: relative;
+      width: 100%;
+      display: flex;
+      justify-content: center;
+    }
+    .single-map-stage .level-card {
+      cursor: default;
+    }
+    .single-map-stage .level-card:hover {
+      transform: none;
+      border-color: #4488ff;
+    }
+    .map-nav {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+    }
+    .map-name {
+      font-size: 14px;
+      color: #fff;
+      letter-spacing: 1px;
+      text-transform: capitalize;
+      min-width: 110px;
+      text-align: center;
     }
     #title-canvas { image-rendering: pixelated; margin-bottom: 4px; }
     #name-screen label { font-size: 13px; color: #aaa; }
@@ -329,6 +364,48 @@
       cursor: pointer;
     }
 
+    /* Active game panel */
+    #active-game-info {
+      width: 100%;
+      flex: 1;
+      display: none;
+      overflow-y: auto;
+    }
+    #active-game-info .agi-box {
+      background: rgba(68,136,255,0.08);
+      border: 1px solid rgba(68,136,255,0.4);
+      border-radius: 10px;
+      padding: 10px 16px;
+      text-align: center;
+    }
+    #active-game-info .agi-title {
+      font-size: 11px;
+      letter-spacing: 2px;
+      color: #88aaff;
+      margin-bottom: 6px;
+    }
+    #active-game-info .agi-players {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 10px;
+      justify-content: center;
+    }
+    #active-game-info .agi-player {
+      font-size: 12px;
+      color: #ddd;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+    #active-game-info .agi-dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      display: inline-block;
+    }
+    #active-game-info .agi-empty {
+      font-size: 12px;
+      color: #888;
+    }
+
     .meter-label {
       position: absolute;
       top: -18px;
@@ -399,13 +476,19 @@
         </div>
       </div>
 
-      <!-- BOTTOM: Map Selection -->
+      <!-- BOTTOM LEFT: Map Selection -->
       <div class="menu-panel" id="map-panel">
         <h2>MAP</h2>
         <div id="level-select" style="width:100%;"></div>
       </div>
+
+      <!-- BOTTOM RIGHT: Players + Play -->
+      <div class="menu-panel" id="play-panel">
+        <h2>PLAYERS</h2>
+        <div id="active-game-info"></div>
+        <button id="join-btn">PLAY</button>
+      </div>
     </div>
-    <button id="join-btn" style="margin:10px 0;">PLAY</button>
   </div>
   <div id="hud" style="display:none;">WASD to move &middot; Space to jump &middot; Shift to sprint</div>
   <div id="leader-display"></div>

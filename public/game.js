@@ -31,6 +31,23 @@ const LEVEL_SPAWN_POINTS = {
     { x: 16.88, y: 151.22, z: 22.6 },
     { x: 13.89, y: 155.79, z: -3.39 },
   ],
+  'level_3.glb': [
+    { x: -81.52, y: -15.48, z: 22.12 },
+    { x: -140.34, y: -18.29, z: 7.88 },
+    { x: -145.72, y: 14.5, z: -21.92 },
+    { x: -120.18, y: -23.09, z: -61.03 },
+    { x: -156.08, y: -0.11, z: -116.92 },
+    { x: -136.33, y: -15.51, z: -128.25 },
+    { x: -91.79, y: -13.65, z: -107.49 },
+    { x: -91.7, y: -17.65, z: -72.68 },
+    { x: -184.28, y: -15.48, z: 52.21 },
+    { x: -179.75, y: -15.48, z: 40.45 },
+    { x: -174.78, y: -15.48, z: 50.9 },
+    { x: -117.39, y: -15.6, z: 87.12 },
+    { x: -91.7, y: -15.58, z: -26.09 },
+    { x: -196.07, y: -15.48, z: -84.23 },
+    { x: -169.17, y: -16.3, z: -6.25 },
+  ],
 };
 let currentLevelName = 'level_1.glb';
 let SPAWN_POINTS = LEVEL_SPAWN_POINTS['level_1.glb'];
@@ -121,6 +138,9 @@ sunLight.shadow.camera.left = -60;
 sunLight.shadow.camera.right = 60;
 sunLight.shadow.camera.top = 60;
 sunLight.shadow.camera.bottom = -60;
+// Bias to kill shadow acne on thin/curved surfaces (e.g. the channel slide) without disabling shadows.
+sunLight.shadow.normalBias = 0.05;
+sunLight.shadow.bias = -0.0004;
 scene.add(sunLight);
 scene.add(sunLight.target);
 
@@ -133,6 +153,186 @@ const sunMat = new THREE.MeshBasicMaterial({ color: 0xffffaa });
 const sunMesh = new THREE.Mesh(sunGeo, sunMat);
 sunMesh.position.copy(sunLight.position);
 scene.add(sunMesh);
+
+// --- Graphics settings (Escape menu) ---
+// These levers trade quality vs framerate. Tone mapping + correct colour space
+// are near-free visual upgrades; resolution and shadows are the real perf dials.
+const graphicsSettings = {
+  resolution: 'balanced', // perf (0.75x) | balanced (1.0x) | sharp (devicePixelRatio)
+  shadows: 'high',        // off | medium (1024) | high (2048)
+  toneMapping: true       // ACES filmic tone mapping for richer contrast
+};
+try {
+  const saved = JSON.parse(localStorage.getItem('gfxSettings') || '{}');
+  Object.assign(graphicsSettings, saved);
+} catch (e) {}
+
+if ('outputColorSpace' in renderer && THREE.SRGBColorSpace) renderer.outputColorSpace = THREE.SRGBColorSpace;
+let maxAnisotropy = 1;
+try { maxAnisotropy = renderer.capabilities.getMaxAnisotropy(); } catch (e) {}
+
+function refreshSceneMaterials() {
+  scene.traverse((o) => {
+    if (!o.material) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of mats) m.needsUpdate = true;
+  });
+}
+
+function applyGraphics(recompile) {
+  // Resolution scale
+  let pr = 1;
+  if (graphicsSettings.resolution === 'perf') pr = 0.75;
+  else if (graphicsSettings.resolution === 'sharp') pr = Math.min(window.devicePixelRatio || 1, 2);
+  renderer.setPixelRatio(pr);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+
+  // Shadows
+  if (graphicsSettings.shadows === 'off') {
+    sunLight.castShadow = false;
+  } else {
+    sunLight.castShadow = true;
+    const size = graphicsSettings.shadows === 'medium' ? 1024 : 2048;
+    if (sunLight.shadow.mapSize.width !== size) {
+      sunLight.shadow.mapSize.set(size, size);
+      if (sunLight.shadow.map) { sunLight.shadow.map.dispose(); sunLight.shadow.map = null; }
+    }
+  }
+
+  // Tone mapping (compiled into materials → only recompile when the user flips it)
+  const wantTM = graphicsSettings.toneMapping ? THREE.ACESFilmicToneMapping : THREE.NoToneMapping;
+  if (renderer.toneMapping !== wantTM) {
+    renderer.toneMapping = wantTM;
+    renderer.toneMappingExposure = 1.1;
+    if (recompile) refreshSceneMaterials();
+  }
+
+  try { localStorage.setItem('gfxSettings', JSON.stringify(graphicsSettings)); } catch (e) {}
+}
+applyGraphics(false);
+
+// --- Graphics settings overlay (toggled with Escape during play) ---
+const gfxMenu = document.createElement('div');
+gfxMenu.id = 'gfx-menu';
+gfxMenu.style.cssText = 'position:fixed;inset:0;z-index:50;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.85);font-family:"04b_03",Lato,sans-serif;';
+gfxMenu.innerHTML = `
+  <div style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:22px 26px;min-width:340px;box-shadow:0 10px 40px rgba(0,0,0,0.6);">
+    <div style="text-align:center;color:#fff;font-size:18px;letter-spacing:2px;margin-bottom:2px;">SETTINGS</div>
+    <div style="text-align:center;color:#888;font-size:10px;letter-spacing:2px;margin-bottom:18px;">GRAPHICS</div>
+    <div class="gfx-row" data-key="resolution" style="display:flex;align-items:center;justify-content:space-between;gap:18px;margin:12px 0;">
+      <span style="color:#aaa;font-size:12px;letter-spacing:1px;">RESOLUTION</span>
+      <button class="gfx-btn lobby-option"></button>
+    </div>
+    <div class="gfx-row" data-key="shadows" style="display:flex;align-items:center;justify-content:space-between;gap:18px;margin:12px 0;">
+      <span style="color:#aaa;font-size:12px;letter-spacing:1px;">SHADOWS</span>
+      <button class="gfx-btn lobby-option"></button>
+    </div>
+    <div class="gfx-row" data-key="toneMapping" style="display:flex;align-items:center;justify-content:space-between;gap:18px;margin:12px 0;">
+      <span style="color:#aaa;font-size:12px;letter-spacing:1px;">ENHANCED COLOR</span>
+      <button class="gfx-btn lobby-option"></button>
+    </div>
+    <button id="gfx-close" style="margin-top:20px;width:100%;padding:10px;background:#4488ff;color:#fff;border:none;border-radius:6px;cursor:pointer;font-family:'04b_03',Lato,sans-serif;font-size:14px;letter-spacing:1px;">RESUME (ESC)</button>
+  </div>`;
+document.body.appendChild(gfxMenu);
+document.getElementById('gfx-close').addEventListener('mouseenter', (e) => e.target.style.background = '#3366dd');
+document.getElementById('gfx-close').addEventListener('mouseleave', (e) => e.target.style.background = '#4488ff');
+
+const GFX_CYCLES = {
+  resolution: [['perf', 'Performance'], ['balanced', 'Balanced'], ['sharp', 'Sharp']],
+  shadows: [['off', 'Off'], ['medium', 'Medium'], ['high', 'High']],
+  toneMapping: [[true, 'On'], [false, 'Off']]
+};
+function gfxLabel(key) {
+  const cur = graphicsSettings[key];
+  const found = GFX_CYCLES[key].find(o => o[0] === cur);
+  return found ? found[1] : String(cur);
+}
+function refreshGfxButtons() {
+  gfxMenu.querySelectorAll('.gfx-row').forEach((row) => {
+    const key = row.dataset.key;
+    const btn = row.querySelector('.gfx-btn');
+    btn.textContent = gfxLabel(key);
+    // Reuse the main-menu .lobby-option look, but always rendered "selected".
+    btn.classList.add('selected');
+    btn.style.minWidth = '120px';
+    btn.style.textAlign = 'center';
+  });
+}
+gfxMenu.querySelectorAll('.gfx-row').forEach((row) => {
+  const key = row.dataset.key;
+  row.querySelector('.gfx-btn').addEventListener('click', () => {
+    const opts = GFX_CYCLES[key];
+    const idx = opts.findIndex(o => o[0] === graphicsSettings[key]);
+    graphicsSettings[key] = opts[(idx + 1) % opts.length][0];
+    applyGraphics(true);
+    refreshGfxButtons();
+  });
+});
+let gfxMenuOpen = false;
+function openGfxMenu() {
+  gfxMenuOpen = true;
+  refreshGfxButtons();
+  gfxMenu.style.display = 'flex';
+  if (document.pointerLockElement) document.exitPointerLock();
+}
+function closeGfxMenu() {
+  gfxMenuOpen = false;
+  gfxMenu.style.display = 'none';
+}
+document.getElementById('gfx-close').addEventListener('click', closeGfxMenu);
+
+// --- In-game chat (press T to type, messages stack bottom-right) ---
+const chatLog = document.createElement('div');
+chatLog.id = 'chat-log';
+chatLog.style.cssText = 'position:fixed;right:12px;bottom:112px;z-index:40;display:flex;flex-direction:column;align-items:flex-end;gap:4px;max-width:340px;pointer-events:none;font-family:"04b_03",Lato,sans-serif;';
+document.body.appendChild(chatLog);
+
+const chatInputWrap = document.createElement('div');
+chatInputWrap.id = 'chat-input-wrap';
+chatInputWrap.style.cssText = 'position:fixed;right:12px;bottom:72px;z-index:41;display:none;';
+chatInputWrap.innerHTML = '<input id="chat-input" type="text" maxlength="200" placeholder="Say something…" autocomplete="off" style="width:320px;padding:8px 12px;font-family:\'04b_03\',Lato,sans-serif;font-size:13px;color:#fff;background:rgba(0,0,0,0.8);border:1px solid #4488ff;border-radius:6px;outline:none;-webkit-user-select:text;user-select:text;">';
+document.body.appendChild(chatInputWrap);
+const chatInput = document.getElementById('chat-input');
+
+let chatOpen = false;
+function openChat() {
+  if (!gameStarted || chatOpen) return;
+  chatOpen = true;
+  chatInputWrap.style.display = 'block';
+  chatInput.value = '';
+  // Focus next tick so the "T" that opened chat isn't typed into the field.
+  setTimeout(() => chatInput.focus(), 0);
+}
+function closeChat() {
+  chatOpen = false;
+  chatInputWrap.style.display = 'none';
+  chatInput.blur();
+}
+function addChatMessage(name, color, text) {
+  const row = document.createElement('div');
+  row.style.cssText = 'background:rgba(0,0,0,0.7);border-radius:6px;padding:5px 9px;font-size:12px;color:#eee;text-shadow:1px 1px 2px rgba(0,0,0,0.9);word-break:break-word;transition:opacity 0.6s;opacity:1;text-align:left;';
+  const safeName = document.createElement('span');
+  safeName.textContent = name + ': ';
+  safeName.style.cssText = 'font-weight:bold;color:' + (color || '#fff') + ';';
+  const safeText = document.createElement('span');
+  safeText.textContent = text;
+  row.appendChild(safeName);
+  row.appendChild(safeText);
+  chatLog.appendChild(row);
+  while (chatLog.children.length > 8) chatLog.removeChild(chatLog.firstChild);
+  setTimeout(() => { row.style.opacity = '0'; setTimeout(() => row.remove(), 700); }, 9000);
+}
+chatInput.addEventListener('keydown', (e) => {
+  e.stopPropagation();
+  if (e.code === 'Enter') {
+    const msg = chatInput.value.trim();
+    if (msg) socket.emit('chat', msg);
+    closeChat();
+  } else if (e.code === 'Escape') {
+    closeChat();
+  }
+});
+chatInput.addEventListener('blur', () => { if (chatOpen) closeChat(); });
 
 let levelLoaded = false;
 let currentLevelObj = null;
@@ -155,6 +355,14 @@ function loadGameLevel(filename) {
       if (child.isMesh) {
         child.receiveShadow = true;
         child.castShadow = true;
+        if (child.material) {
+          const mats = Array.isArray(child.material) ? child.material : [child.material];
+          for (const m of mats) {
+            for (const t of [m.map, m.normalMap, m.roughnessMap, m.metalnessMap, m.emissiveMap]) {
+              if (t) { t.anisotropy = maxAnisotropy; t.needsUpdate = true; }
+            }
+          }
+        }
         addLevelCollider(child);
       }
     });
@@ -190,8 +398,14 @@ world.addContactMaterial(new CANNON.ContactMaterial(playerMaterial, playerMateri
   friction: 0.3, restitution: 0.2
 }));
 
+// The single ground plane tracks the LOCAL player's footing via raycast. Put it
+// in its own collision group so loose objects (coins) don't slam into it at the
+// player's height — they get their own terrain raycast instead.
+const GROUP_GROUNDPLANE = 2;
 const groundBody = new CANNON.Body({ mass: 0, material: groundMaterial });
 groundBody.addShape(new CANNON.Plane());
+groundBody.collisionFilterGroup = GROUP_GROUNDPLANE;
+groundBody.collisionFilterMask = -1; // collide with every group (players etc.)
 groundBody.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -Math.PI / 2);
 groundBody.position.set(0, 0, 0);
 world.addBody(groundBody);
@@ -207,11 +421,17 @@ function addLevelCollider(mesh) {
 const raycaster = new THREE.Raycaster();
 let rayGrounded = false;
 
-function raycastLevel(origin, direction, maxDist) {
+function raycastLevel(origin, direction, maxDist, skipThin) {
   raycaster.set(origin, direction);
   raycaster.far = maxDist;
   const hits = raycaster.intersectObjects(levelMeshes, false);
-  return hits.length > 0 ? hits[0] : null;
+  if (!skipThin) return hits.length > 0 ? hits[0] : null;
+  // Skip thin ride-on platforms (bridges) for wall/ceiling resolution so players
+  // don't catch on their edges or get bonked by their underside.
+  for (const h of hits) {
+    if (!(h.object.userData && h.object.userData.thinPlatform)) return h;
+  }
+  return null;
 }
 
 function updateGroundPlane(body) {
@@ -237,31 +457,53 @@ function resolveWallCollisions(body) {
     new THREE.Vector3(1, 0, -1).normalize(), new THREE.Vector3(-1, 0, -1).normalize()
   ];
 
-  const wallOrigin = new THREE.Vector3(p.x, p.y, p.z);
-  for (const dir of wallDirs) {
-    const hit = raycastLevel(wallOrigin, dir, PLAYER_RADIUS + 0.05);
-    if (hit) {
-      const pushDist = PLAYER_RADIUS + 0.05 - hit.distance;
-      p.x -= dir.x * pushDist;
-      p.z -= dir.z * pushDist;
-      const velDot = body.velocity.x * dir.x + body.velocity.z * dir.z;
-      if (velDot > 0) {
-        body.velocity.x -= dir.x * velDot;
-        body.velocity.z -= dir.z * velDot;
+  // Resolve walls one penetration at a time (deepest first). Summing all 8
+  // directions at once pins the player in corners; iterating the single worst
+  // overlap lets them slide along surfaces instead of getting stuck.
+  const reach = PLAYER_RADIUS + 0.05;
+  for (let pass = 0; pass < 3; pass++) {
+    const wallOrigin = new THREE.Vector3(p.x, p.y, p.z);
+    let bestDir = null, bestPush = 0;
+    for (const dir of wallDirs) {
+      const hit = raycastLevel(wallOrigin, dir, reach, true);
+      if (hit) {
+        const pushDist = reach - hit.distance;
+        if (pushDist > bestPush) { bestPush = pushDist; bestDir = dir; }
       }
+    }
+    if (!bestDir) break;
+    p.x -= bestDir.x * bestPush;
+    p.z -= bestDir.z * bestPush;
+    const velDot = body.velocity.x * bestDir.x + body.velocity.z * bestDir.z;
+    if (velDot > 0) {
+      body.velocity.x -= bestDir.x * velDot;
+      body.velocity.z -= bestDir.z * velDot;
     }
   }
 
-  // Ceiling collision — prevent jumping through ceilings
-  const ceilOrigin = new THREE.Vector3(p.x, p.y + 0.3, p.z);
-  const ceilHit = raycastLevel(ceilOrigin, new THREE.Vector3(0, 1, 0), PLAYER_RADIUS + 0.5);
-  if (ceilHit) {
-    const headroom = ceilHit.distance;
-    if (headroom < PLAYER_RADIUS + 0.1) {
-      p.y = ceilHit.point.y - PLAYER_RADIUS - 0.1;
-    }
-    if (body.velocity.y > 0) {
-      body.velocity.y = 0;
+  // Ceiling collision — the player has already been moved by world.step before
+  // this runs, so a fast jump can land them ABOVE the ceiling and a ray cast up
+  // from there sees nothing. Instead we sweep from where the body was this frame
+  // (previousPosition) up through where it is now, so the whole jump arc is
+  // covered. Multiple offset rays catch sloped ceilings a single centre ray
+  // would slip past.
+  const prevY = (body.previousPosition && isFinite(body.previousPosition.y)) ? body.previousPosition.y : p.y;
+  const movedUp = Math.max(0, p.y - prevY);
+  const velLook = Math.max(0, body.velocity.y) * PHYSICS_STEP;
+  const ceilReach = PLAYER_RADIUS + 0.3 + movedUp + velLook;
+  const r = PLAYER_RADIUS * 0.7;
+  const ceilOffsets = [[0, 0], [r, 0], [-r, 0], [0, r], [0, -r]];
+  let nearestCeil = null;
+  for (const [ox, oz] of ceilOffsets) {
+    const o = new THREE.Vector3(p.x + ox, prevY, p.z + oz);
+    const h = raycastLevel(o, new THREE.Vector3(0, 1, 0), ceilReach, true);
+    if (h && (!nearestCeil || h.distance < nearestCeil.distance)) nearestCeil = h;
+  }
+  if (nearestCeil) {
+    const clampY = nearestCeil.point.y - PLAYER_RADIUS - 0.1;
+    if (p.y > clampY) {
+      p.y = clampY;
+      if (body.velocity.y > 0) body.velocity.y = 0;
     }
   }
 }
@@ -862,7 +1104,7 @@ function returnToMenu() {
 
   for (const b of worldBuilds) {
     scene.remove(b.mesh);
-    world.removeBody(b.body);
+    if (b.body) world.removeBody(b.body);
     const lIdx = levelMeshes.indexOf(b.mesh);
     if (lIdx !== -1) levelMeshes.splice(lIdx, 1);
   }
@@ -1010,7 +1252,9 @@ gmToolStyle.textContent = `
   .gm-tool:hover { background: rgba(255,255,255,0.15); }
   .gm-tool.selected { background: rgba(68,136,255,0.4); border-left: 3px solid #4488ff; }
   #name-screen, #level-select, #title-canvas, #cube-preview { position:relative; z-index:10; }
-  #name-screen, #name-screen *:not(input):not(button) { background: transparent !important; background-color: transparent !important; box-shadow: none !important; border: none !important; backdrop-filter: none !important; }
+  #name-screen, #name-screen *:not(input):not(button):not(.agi-box):not(.agi-dot) { background: transparent !important; background-color: transparent !important; box-shadow: none !important; border: none !important; backdrop-filter: none !important; }
+  #active-game-info .agi-box { background: rgba(68,136,255,0.08) !important; border: 1px solid rgba(68,136,255,0.4) !important; }
+  #active-game-info .agi-dot { border: 1px solid rgba(255,255,255,0.5) !important; }
 `;
 document.head.appendChild(gmToolStyle);
 
@@ -1176,13 +1420,34 @@ const CHANNEL_RADIUS = 2.5;   // inner radius — diameter 5 fits ~2 players
 const CHANNEL_FACETS = 12;    // arc segments across the half-pipe
 const worldChannels = [];     // { id, group, bodies, meshes }
 
-// Builds the whole channel as a smooth half-pipe swept along a Catmull-Rom curve
-// through the anchor points. The anchors guide the curve; the trough flows
-// gradually between them rather than kinking at each click.
-// Returns { geo: BufferGeometry (absolute coords), segmentPanels: [ [{center,quaternion,hx,hy,hz}, ...], ... ] }.
+// Mixes interpolating and approximating behavior: gentle anchors are passed
+// through (interpolating); sharp corners get pulled toward the midpoint of their
+// neighbors (approximating) so the curve rounds them off instead of kinking.
+const CHANNEL_MAX_RELAX = 0.6;        // strongest pull at very sharp corners
+function relaxChannelAnchors(points) {
+  if (points.length <= 2) return points.map(p => p.clone());
+  const out = [points[0].clone()];
+  for (let i = 1; i < points.length - 1; i++) {
+    const prev = points[i - 1], cur = points[i], next = points[i + 1];
+    const v1 = new THREE.Vector3().subVectors(cur, prev);
+    const v2 = new THREE.Vector3().subVectors(next, cur);
+    if (v1.lengthSq() < 1e-8 || v2.lengthSq() < 1e-8) { out.push(cur.clone()); continue; }
+    const angle = Math.acos(THREE.MathUtils.clamp(v1.normalize().dot(v2.normalize()), -1, 1)); // 0=straight, PI=U-turn
+    // no relaxation under ~25°, ramping up to full relax past ~125°
+    const t = THREE.MathUtils.clamp((angle - Math.PI / 7) / (Math.PI * 0.6), 0, 1) * CHANNEL_MAX_RELAX;
+    const mid = new THREE.Vector3().addVectors(prev, next).multiplyScalar(0.5);
+    out.push(cur.clone().lerp(mid, t));
+  }
+  out.push(points[points.length - 1].clone());
+  return out;
+}
+
+// Builds the whole channel as a smooth half-pipe swept along a Catmull-Rom curve.
+// Returns { geo, segmentPanels: [...], anchorPosts: [Vector3] (relaxed anchor positions, on the curve) }.
 function buildChannelGeometry(points, radius) {
   if (!points || points.length < 2) return null;
-  const curve = new THREE.CatmullRomCurve3(points.map(p => p.clone()), false, 'centripetal', 0.5);
+  const anchors = relaxChannelAnchors(points);
+  const curve = new THREE.CatmullRomCurve3(anchors.map(p => p.clone()), false, 'centripetal', 0.5);
   const L = curve.getLength();
   const N = Math.max(2, Math.min(260, Math.ceil(L / 1.5))); // ring spacing ~1.5 units
   const samples = curve.getSpacedPoints(N);                 // N+1 evenly arc-spaced points
@@ -1249,7 +1514,7 @@ function buildChannelGeometry(points, radius) {
     }
     segmentPanels.push(panels);
   }
-  return { geo, segmentPanels };
+  return { geo, segmentPanels, anchorPosts: anchors };
 }
 
 const channelGhostMat = new THREE.MeshBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide });
@@ -1257,6 +1522,8 @@ const channelGhostGroup = new THREE.Group();
 scene.add(channelGhostGroup);
 const channelNodeMarkerGeo = new THREE.SphereGeometry(0.35, 8, 8);
 const channelNodeMarkerMat = new THREE.MeshBasicMaterial({ color: 0xffff44 });
+const channelGhostRay = new THREE.Raycaster();
+channelGhostRay.far = 1000;
 
 function clearChannelGhost() {
   for (let i = channelGhostGroup.children.length - 1; i >= 0; i--) {
@@ -1267,17 +1534,35 @@ function clearChannelGhost() {
 }
 function rebuildChannelGhost(points) {
   clearChannelGhost();
-  for (let i = 0; i < points.length - 1; i++) {
-    const data = channelSegmentGeometry(points[i], points[i + 1], CHANNEL_RADIUS);
-    if (!data) continue;
-    const mesh = new THREE.Mesh(data.geo, channelGhostMat);
-    mesh.userData.disposeGeo = true;
-    channelGhostGroup.add(mesh);
+  if (points.length >= 2) {
+    const data = buildChannelGeometry(points, CHANNEL_RADIUS);
+    if (data) {
+      const mesh = new THREE.Mesh(data.geo, channelGhostMat);
+      mesh.userData.disposeGeo = true;
+      channelGhostGroup.add(mesh);
+    }
   }
+  // markers at the actual click points
   for (const p of points) {
     const mk = new THREE.Mesh(channelNodeMarkerGeo, channelNodeMarkerMat);
     mk.position.copy(p);
     channelGhostGroup.add(mk);
+  }
+  // ghost support posts under the (relaxed) anchors, matching the placed result
+  const down = new THREE.Vector3(0, -1, 0);
+  const postAnchors = points.length >= 2 ? relaxChannelAnchors(points) : points;
+  for (const a of postAnchors) {
+    const topY = a.y - CHANNEL_RADIUS * 0.15;
+    channelGhostRay.set(new THREE.Vector3(a.x, topY - 0.05, a.z), down);
+    const hits = channelGhostRay.intersectObjects(levelMeshes, false);
+    const groundY = hits.length > 0 ? hits[0].point.y : a.y - 14;
+    const h = topY - groundY;
+    if (h >= 0.25) {
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, h, 8), channelGhostMat);
+      post.position.set(a.x, groundY + h / 2, a.z);
+      post.userData.disposeGeo = true;
+      channelGhostGroup.add(post);
+    }
   }
   channelGhostGroup.visible = points.length > 0;
 }
@@ -1999,6 +2284,9 @@ function joinGame() {
   socket.emit('selectLevel', levelToLoad);
   if (currentLevelName !== levelToLoad || !levelLoaded) loadGameLevel(levelToLoad);
   cleanupPreviews();
+  stopActiveGamePolling();
+  const agiEl = document.getElementById('active-game-info');
+  if (agiEl) agiEl.style.display = 'none';
 
   gameStarted = true;
   if (isMobile) {
@@ -2019,6 +2307,7 @@ nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') joinGame()
 // --- Scoreboard UI ---
 let tabHeld = false;
 document.addEventListener('keydown', (e) => {
+  if (chatOpen) return;
   if (e.code === 'Tab') { e.preventDefault(); tabHeld = true; }
 });
 document.addEventListener('keyup', (e) => {
@@ -2096,6 +2385,46 @@ let serverActiveLevel = 'level_1.glb';
 const levelPreviews = [];
 let previewsActive = false;
 
+// --- Active game panel (main menu) ---
+function prettyLevelName(f) {
+  return (f || '').replace(/\.glb$/, '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+function renderActiveGame(state) {
+  const el = document.getElementById('active-game-info');
+  if (!el) return;
+  const count = state ? (state.playerCount || 0) : 0;
+  if (!state || count === 0) {
+    el.style.display = 'block';
+    el.innerHTML = '<div class="agi-box"><div class="agi-title">NO ACTIVE GAME</div><div class="agi-empty">Be the first to jump in!</div></div>';
+    return;
+  }
+  const players = Array.isArray(state.players) ? state.players : [];
+  const chips = players.map(p => {
+    const dot = '<span class="agi-dot" style="background:' + (p.color || '#fff') + '"></span>';
+    const span = document.createElement('span');
+    span.textContent = p.name + ' (' + (p.score || 0) + ')';
+    return '<span class="agi-player">' + dot + span.outerHTML + '</span>';
+  }).join('');
+  el.style.display = 'block';
+  el.innerHTML = '<div class="agi-box">' +
+    '<div class="agi-title">ACTIVE GAME · ' + prettyLevelName(state.activeLevel) + ' · ' + count + ' PLAYING</div>' +
+    '<div class="agi-players">' + chips + '</div></div>';
+}
+let activeGamePollTimer = null;
+async function pollActiveGame() {
+  try {
+    const state = await fetch('/api/game-state').then(r => r.json());
+    if (!gameStarted) renderActiveGame(state);
+  } catch (e) {}
+}
+function startActiveGamePolling() {
+  pollActiveGame();
+  if (!activeGamePollTimer) activeGamePollTimer = setInterval(pollActiveGame, 4000);
+}
+function stopActiveGamePolling() {
+  if (activeGamePollTimer) { clearInterval(activeGamePollTimer); activeGamePollTimer = null; }
+}
+
 async function initLevelSelect() {
   try {
     const [levelsRes, stateRes] = await Promise.all([
@@ -2109,6 +2438,9 @@ async function initLevelSelect() {
     loadGameLevel(serverActiveLevel);
     if (menuOverlay) menuOverlay.style.display = 'block';
 
+    renderActiveGame(stateRes);
+    startActiveGamePolling();
+
     const selectDiv = document.getElementById('level-select');
     if (!selectDiv) return;
 
@@ -2117,58 +2449,41 @@ async function initLevelSelect() {
       return;
     }
 
-    if (levelsRes.length <= 1) {
-      selectDiv.style.display = 'none';
-      selectedLevel = levelsRes[0] || 'level_1.glb';
-      return;
-    }
-
     selectDiv.style.display = 'block';
-    selectDiv.innerHTML = '<div class="level-carousel"><div class="level-arrow" id="level-arrow-left">◀</div><div class="level-grid"></div><div class="level-arrow" id="level-arrow-right">▶</div></div>';
-    const grid = selectDiv.querySelector('.level-grid');
+    const single = (levelsRes.length <= 1) ? '' :
+      '<div class="level-arrow" id="map-prev">◀</div>';
+    const singleR = (levelsRes.length <= 1) ? '' :
+      '<div class="level-arrow" id="map-next">▶</div>';
+    selectDiv.innerHTML = '<div class="single-map"><div class="single-map-stage"></div><div class="map-nav">' +
+      single + '<div class="map-name" id="map-name"></div>' + singleR + '</div></div>';
+    const stage = selectDiv.querySelector('.single-map-stage');
+    const nameEl = selectDiv.querySelector('#map-name');
 
     for (const filename of levelsRes) {
-      const preview = createLevelPreview(filename, grid);
+      const preview = createLevelPreview(filename, stage);
+      preview.wrapper.style.display = 'none';
       levelPreviews.push(preview);
+    }
 
-      preview.wrapper.addEventListener('click', () => {
-        selectedLevel = filename;
-        for (const p of levelPreviews) {
-          p.wrapper.classList.toggle('selected', p.filename === filename);
-        }
-        socket.emit('selectLevel', filename);
+    let curIndex = Math.max(0, levelsRes.indexOf(selectedLevel));
+
+    function showMap(i) {
+      curIndex = (i + levelsRes.length) % levelsRes.length;
+      selectedLevel = levelsRes[curIndex];
+      levelPreviews.forEach((p, idx) => {
+        p.wrapper.style.display = idx === curIndex ? 'block' : 'none';
+        p.wrapper.classList.toggle('selected', idx === curIndex);
       });
-
-      if (filename === selectedLevel) {
-        preview.wrapper.classList.add('selected');
-      }
+      if (nameEl) nameEl.textContent = prettyLevelName(selectedLevel);
+      socket.emit('selectLevel', selectedLevel);
     }
 
-    // Arrow buttons
-    const arrowLeft = document.getElementById('level-arrow-left');
-    const arrowRight = document.getElementById('level-arrow-right');
-    const cardWidth = () => grid.querySelector('.level-card')?.offsetWidth + 12 || 232;
-    arrowLeft.addEventListener('click', () => grid.scrollBy({ left: -cardWidth(), behavior: 'smooth' }));
-    arrowRight.addEventListener('click', () => grid.scrollBy({ left: cardWidth(), behavior: 'smooth' }));
+    const prevBtn = document.getElementById('map-prev');
+    const nextBtn = document.getElementById('map-next');
+    if (prevBtn) prevBtn.addEventListener('click', () => showMap(curIndex - 1));
+    if (nextBtn) nextBtn.addEventListener('click', () => showMap(curIndex + 1));
 
-    // Drag-to-scroll (desktop)
-    let dragStart = null, dragScrollLeft = 0;
-    grid.addEventListener('mousedown', (e) => { dragStart = e.pageX; dragScrollLeft = grid.scrollLeft; grid.style.cursor = 'grabbing'; });
-    window.addEventListener('mousemove', (e) => { if (dragStart === null) return; grid.scrollLeft = dragScrollLeft - (e.pageX - dragStart); });
-    window.addEventListener('mouseup', () => { if (dragStart === null) return; dragStart = null; grid.style.cursor = ''; snapToNearest(); });
-
-    // Snap to nearest card after scroll ends (touch or drag)
-    let snapTimeout = null;
-    grid.addEventListener('scroll', () => { clearTimeout(snapTimeout); snapTimeout = setTimeout(snapToNearest, 120); });
-    function snapToNearest() {
-      const cards = grid.querySelectorAll('.level-card');
-      if (!cards.length) return;
-      const gridRect = grid.getBoundingClientRect();
-      const center = gridRect.left + gridRect.width / 2;
-      let closest = cards[0], minDist = Infinity;
-      cards.forEach(c => { const d = Math.abs(c.getBoundingClientRect().left + c.offsetWidth / 2 - center); if (d < minDist) { minDist = d; closest = c; } });
-      closest.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
-    }
+    showMap(curIndex);
 
     previewsActive = true;
     animatePreviews();
@@ -2179,16 +2494,17 @@ async function initLevelSelect() {
 }
 
 function createLevelPreview(filename, container) {
+  const PW = 300, PH = 190;
   const canvas = document.createElement('canvas');
-  canvas.width = 220;
-  canvas.height = 160;
+  canvas.width = PW;
+  canvas.height = PH;
 
   const pRenderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
-  pRenderer.setSize(220, 160);
+  pRenderer.setSize(PW, PH);
 
   const pScene = new THREE.Scene();
   pScene.background = new THREE.Color(0x1a1a2e);
-  const pCamera = new THREE.PerspectiveCamera(50, 220 / 160, 0.1, 10000);
+  const pCamera = new THREE.PerspectiveCamera(50, PW / PH, 0.1, 10000);
 
   pScene.add(new THREE.AmbientLight(0xffffff, 0.5));
   const pDirLight = new THREE.DirectionalLight(0xfff4e0, 1.2);
@@ -2221,10 +2537,6 @@ function createLevelPreview(filename, container) {
   const wrapper = document.createElement('div');
   wrapper.className = 'level-card';
   wrapper.appendChild(canvas);
-  const label = document.createElement('div');
-  label.className = 'level-label';
-  label.textContent = filename.replace('.glb', '').replace(/_/g, ' ');
-  wrapper.appendChild(label);
   container.appendChild(wrapper);
 
   return { renderer: pRenderer, scene: pScene, camera: pCamera, getGroup: () => levelGroup, wrapper, filename };
@@ -2234,6 +2546,7 @@ function animatePreviews() {
   if (!previewsActive) return;
   requestAnimationFrame(animatePreviews);
   for (const p of levelPreviews) {
+    if (p.wrapper.style.display === 'none') continue;
     const g = p.getGroup();
     if (g) g.rotation.y += 0.003;
     p.renderer.render(p.scene, p.camera);
@@ -2472,6 +2785,7 @@ if (isMobile) {
   });
 } else {
   window.addEventListener('keydown', (e) => {
+    if (chatOpen) return; // don't drive movement while typing in chat
     keys[e.code] = true;
     if (e.code === 'Space') e.preventDefault();
     if (e.code === 'Tab') e.preventDefault();
@@ -2676,6 +2990,7 @@ function createPlayerBody(shape, isLocal) {
     linearDamping: 0.1,
     angularDamping: angDamp
   });
+  body.collisionFilterMask = -1; // must include the ground-plane group (2)
   world.addBody(body);
   return body;
 }
@@ -2724,6 +3039,7 @@ function rebuildSprintPhysics() {
     linearDamping: 0.1,
     angularDamping: isSpherePhysics ? 0.6 : 0.05
   });
+  localBody.collisionFilterMask = -1; // must include the ground-plane group (2)
   localBody.position.copy(pos);
   localBody.velocity.copy(vel);
   localBody.angularVelocity.copy(angVel);
@@ -3410,6 +3726,7 @@ function updateCrowns() {
 
 // --- Networking ---
 const socket = io();
+socket.on('chatMessage', (m) => { if (m && m.text) addChatMessage(m.name || 'Player', m.color, m.text); });
 
 function startGame() {
   socket.emit('ready', {
@@ -3647,14 +3964,22 @@ function addBuildToWorld(b) {
   mesh.castShadow = !isHolo; mesh.receiveShadow = !isHolo;
   scene.add(mesh);
   addLevelCollider(mesh);
-  const body = new CANNON.Body({ mass: 0, shape, material: groundMaterial });
-  body.position.set(b.x, b.y, b.z);
-  if (b.ry || b.rx) {
-     const qx = new CANNON.Quaternion(); if (b.rx) qx.setFromAxisAngle(new CANNON.Vec3(1,0,0), b.rx);
-     const qy = new CANNON.Quaternion(); if (b.ry) qy.setFromAxisAngle(new CANNON.Vec3(0,1,0), b.ry);
-     body.quaternion = qy.mult(qx);
+
+  // Bridges are thin ride-on walkways: collide via the downward ground ray only
+  // (no Cannon body, skipped by wall/ceiling rays) so players don't snag on them.
+  let body = null;
+  if (b.type === 'bridge') {
+    mesh.userData.thinPlatform = true;
+  } else {
+    body = new CANNON.Body({ mass: 0, shape, material: groundMaterial });
+    body.position.set(b.x, b.y, b.z);
+    if (b.ry || b.rx) {
+       const qx = new CANNON.Quaternion(); if (b.rx) qx.setFromAxisAngle(new CANNON.Vec3(1,0,0), b.rx);
+       const qy = new CANNON.Quaternion(); if (b.ry) qy.setFromAxisAngle(new CANNON.Vec3(0,1,0), b.ry);
+       body.quaternion = qy.mult(qx);
+    }
+    world.addBody(body);
   }
-  world.addBody(body);
   worldBuilds.push({ id: b.id, mesh, body });
 }
 socket.on('currentModels', (ms) => {
@@ -3666,31 +3991,63 @@ socket.on('modelPlaced', (m) => createModelAt(m));
 socket.on('modelRemoved', (id) => removeModelById(id));
 
 const channelMat = new THREE.MeshStandardMaterial({ color: 0x6f8aa6, roughness: 0.55, metalness: 0.15, side: THREE.DoubleSide });
+const channelPostMat = new THREE.MeshStandardMaterial({ color: 0x556070, roughness: 0.7, metalness: 0.2 });
+const CHANNEL_POST_RADIUS = 0.35;
+const channelPostRaycaster = new THREE.Raycaster();
+channelPostRaycaster.far = 1000;
 function addChannelToWorld(c) {
   const group = new THREE.Group();
   const bodies = [];
   const meshes = [];
   const pts = c.nodes.map(n => new THREE.Vector3(n.x, n.y, n.z));
   const radius = c.radius || CHANNEL_RADIUS;
-  for (let i = 0; i < pts.length - 1; i++) {
-    const data = channelSegmentGeometry(pts[i], pts[i + 1], radius);
-    if (!data) continue;
+  const data = buildChannelGeometry(pts, radius);
+
+  // Support posts: drop a pillar from each (relaxed) anchor down to whatever is below.
+  // Use the curve's anchor positions so posts sit under the actual tube; tuck their
+  // tops just under the floor so they don't poke up into the slide. Done BEFORE the
+  // tube joins levelMeshes so the down-ray can't self-hit.
+  const postAnchors = (data && data.anchorPosts) ? data.anchorPosts : pts;
+  const down = new THREE.Vector3(0, -1, 0);
+  for (const a of postAnchors) {
+    const topY = a.y - radius * 0.15; // tuck under the trough floor
+    channelPostRaycaster.set(new THREE.Vector3(a.x, topY - 0.05, a.z), down);
+    const hits = channelPostRaycaster.intersectObjects(levelMeshes, false);
+    const groundY = hits.length > 0 ? hits[0].point.y : a.y - 14; // fallback length if nothing below
+    const height = topY - groundY;
+    if (height < 0.25) continue;
+    const postMesh = new THREE.Mesh(new THREE.CylinderGeometry(CHANNEL_POST_RADIUS, CHANNEL_POST_RADIUS, height, 10), channelPostMat);
+    postMesh.position.set(a.x, groundY + height / 2, a.z);
+    postMesh.castShadow = true; postMesh.receiveShadow = true;
+    postMesh.userData.channelId = c.id;
+    group.add(postMesh);
+    meshes.push(postMesh);
+    const pbody = new CANNON.Body({ mass: 0, material: groundMaterial });
+    pbody.addShape(new CANNON.Box(new CANNON.Vec3(CHANNEL_POST_RADIUS, height / 2, CHANNEL_POST_RADIUS)));
+    pbody.position.set(a.x, groundY + height / 2, a.z);
+    world.addBody(pbody);
+    bodies.push(pbody);
+  }
+
+  if (data) {
     const mesh = new THREE.Mesh(data.geo, channelMat);
     mesh.castShadow = true; mesh.receiveShadow = true;
     mesh.userData.channelId = c.id;
     group.add(mesh);
     addLevelCollider(mesh);
     meshes.push(mesh);
-    const body = new CANNON.Body({ mass: 0, material: groundMaterial });
-    for (const p of data.panels) {
-      body.addShape(
-        new CANNON.Box(new CANNON.Vec3(p.hx, p.hy, p.hz)),
-        new CANNON.Vec3(p.center.x, p.center.y, p.center.z),
-        new CANNON.Quaternion(p.quaternion.x, p.quaternion.y, p.quaternion.z, p.quaternion.w)
-      );
+    for (const panels of data.segmentPanels) {
+      const body = new CANNON.Body({ mass: 0, material: groundMaterial });
+      for (const p of panels) {
+        body.addShape(
+          new CANNON.Box(new CANNON.Vec3(p.hx, p.hy, p.hz)),
+          new CANNON.Vec3(p.center.x, p.center.y, p.center.z),
+          new CANNON.Quaternion(p.quaternion.x, p.quaternion.y, p.quaternion.z, p.quaternion.w)
+        );
+      }
+      world.addBody(body);
+      bodies.push(body);
     }
-    world.addBody(body);
-    bodies.push(body);
   }
   scene.add(group);
   worldChannels.push({ id: c.id, group, bodies, meshes });
@@ -3716,7 +4073,7 @@ socket.on('buildRemoved', (id) => {
   const idx = worldBuilds.findIndex(b => b.id === id);
   if (idx !== -1) {
     const b = worldBuilds[idx];
-    scene.remove(b.mesh); world.removeBody(b.body);
+    scene.remove(b.mesh); if (b.body) world.removeBody(b.body);
     const lIdx = levelMeshes.indexOf(b.mesh); if (lIdx !== -1) levelMeshes.splice(lIdx, 1);
     worldBuilds.splice(idx, 1);
   }
@@ -3808,6 +4165,7 @@ socket.on('coinsDropped', (coins) => {
       material: playerMaterial,
       linearDamping: 0.1, angularDamping: 0.1
     });
+    body.collisionFilterMask = ~GROUP_GROUNDPLANE; // ignore the player-tracking plane
     body.position.set(c.x, c.y, c.z);
     body.velocity.set(c.vx, c.vy, c.vz);
     body.angularVelocity.set(c.rx || 0, c.ry || 0, c.rz || 0);
@@ -4055,6 +4413,12 @@ frontDot.frustumCulled = false;
 debugFrontGroup.add(frontDot);
 
 window.addEventListener('keydown', (e) => {
+  if (chatOpen) return; // chat input handles its own keys (Enter/Esc)
+  if (e.code === 'KeyT' && gameStarted && !gfxMenuOpen) {
+    e.preventDefault();
+    openChat();
+    return;
+  }
   if (e.code === 'Backquote') {
     e.preventDefault();
     debugVisible = !debugVisible;
@@ -4065,16 +4429,18 @@ window.addEventListener('keydown', (e) => {
   }
   if (e.code === 'F4' && gameStarted) {
     e.preventDefault();
-    if (!godmode) enterGodmode();
-    else if (godmodeMenu.style.display === 'none') showGodmodeMenu(); // reopen menu, stay in godmode
-    else exitGodmode();
+    if (!godmode) enterGodmode(); else exitGodmode();
   }
   if (e.code === 'Escape' && gameStarted && godmode) {
     e.preventDefault();
     if (godmodeToolSelected === 'build_channel' && channelNodes.length > 0) {
-      resetChannelDraft(); showToast('Channel cancelled');       // cancel in-progress channel first
-    } else if (godmodeMenu.style.display !== 'none') hideGodmodeMenu(); // first Esc: just close the menu
-    else exitGodmode();                                          // second Esc: fully exit to player
+      resetChannelDraft(); showToast('Channel cancelled'); // cancel in-progress channel draft, stay in godmode
+    } else {
+      exitGodmode(); // single press: back to normal
+    }
+  } else if (e.code === 'Escape' && gameStarted && !godmode) {
+    e.preventDefault();
+    if (gfxMenuOpen) closeGfxMenu(); else openGfxMenu();
   }
   if (e.code === 'Enter' && gameStarted && godmode && godmodeToolSelected === 'build_channel') {
     e.preventDefault();
@@ -4149,6 +4515,7 @@ function rebuildLocalRoundcube() {
       linearDamping: 0.1,
       angularDamping: isSpherePhysics ? 0.6 : 0.05
     });
+    localBody.collisionFilterMask = -1; // must include the ground-plane group (2)
     localBody.position.copy(pos);
     localBody.velocity.copy(vel);
     localBody.angularVelocity.copy(angVel);
@@ -4615,6 +4982,19 @@ function animate() {
 
     // Update coins
     for (const c of activeCoinsList) {
+      // Rest on the actual terrain beneath each coin (the shared ground plane
+      // only follows the local player, so without this coins all settle on one
+      // height). Cheap: ≤15 coins, gone after 15s.
+      const cp = c.body.position;
+      const groundHit = raycastLevel(new THREE.Vector3(cp.x, cp.y + 0.6, cp.z), new THREE.Vector3(0, -1, 0), 80, false);
+      if (groundHit) {
+        const restY = groundHit.point.y + 0.06;
+        if (cp.y < restY) {
+          cp.y = restY;
+          if (c.body.velocity.y < 0) c.body.velocity.y *= -0.3; // gentle bounce
+          c.body.velocity.x *= 0.6; c.body.velocity.z *= 0.6;   // ground friction
+        }
+      }
       c.mesh.position.copy(c.body.position);
       c.mesh.quaternion.copy(c.body.quaternion);
       if (c.collectTimer > 0) c.collectTimer -= delta;
