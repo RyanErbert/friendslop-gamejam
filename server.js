@@ -15,6 +15,7 @@ app.use('/music', express.static(path.join(__dirname, 'music')));
 app.use('/sound', express.static(path.join(__dirname, 'sound')));
 app.use('/prefabs', express.static(path.join(__dirname, 'prefabs')));
 app.use('/players', express.static(path.join(__dirname, 'players')));
+app.use('/models', express.static(path.join(__dirname, 'models')));
 
 let activeLevel = 'level_1.glb';
 let levelLocked = false;
@@ -25,6 +26,15 @@ app.get('/api/levels', (req, res) => {
     res.json(files);
   } catch (e) {
     res.json(['level_1.glb']);
+  }
+});
+
+app.get('/api/models', (req, res) => {
+  try {
+    const files = fs.readdirSync(path.join(__dirname, 'models')).filter(f => f.endsWith('.glb'));
+    res.json(files);
+  } catch (e) {
+    res.json([]);
   }
 });
 
@@ -107,6 +117,8 @@ const activeMines = [];
 const activeCoins = [];
 const activePads = [];
 const activeBuilds = [];
+const activeModels = [];
+const activeChannels = [];
 
 function pickRandomHolder() {
   const ids = Object.keys(players);
@@ -192,6 +204,8 @@ io.on('connection', (socket) => {
     socket.emit('currentMines', activeMines);
     socket.emit('currentPads', activePads);
     socket.emit('currentBuilds', activeBuilds);
+    socket.emit('currentModels', activeModels);
+    socket.emit('currentChannels', activeChannels);
     socket.broadcast.emit('newPlayer', { id: socket.id, ...players[socket.id] });
 
     // First player becomes holder
@@ -245,7 +259,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('placePedestal', (pos) => {
-    const id = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
+    const id = (typeof pos.id === 'string' && pos.id) ? pos.id : (Date.now().toString(36) + Math.random().toString(36).substr(2, 5));
     const ped = { ...pos, id, currentItem: null, spawnTime: 0 };
     pedestals.push(ped);
     io.emit('pedestalPlaced', ped);
@@ -267,6 +281,45 @@ io.on('connection', (socket) => {
     if (idx !== -1) {
       activeBuilds.splice(idx, 1);
       io.emit('buildRemoved', id);
+    }
+  });
+
+  socket.on('placeChannel', (c) => {
+    if (!c || !Array.isArray(c.nodes) || c.nodes.length < 2) return;
+    const channel = {
+      id: (typeof c.id === 'string' && c.id) ? c.id : (Date.now().toString(36) + Math.random().toString(36).substr(2)),
+      nodes: c.nodes.slice(0, 64).map(n => ({ x: Number(n.x) || 0, y: Number(n.y) || 0, z: Number(n.z) || 0 })),
+      radius: Number(c.radius) || 2.5
+    };
+    activeChannels.push(channel);
+    io.emit('channelPlaced', channel);
+  });
+
+  socket.on('removeChannel', (id) => {
+    const idx = activeChannels.findIndex(c => c.id === id);
+    if (idx !== -1) {
+      activeChannels.splice(idx, 1);
+      io.emit('channelRemoved', id);
+    }
+  });
+
+  socket.on('placeModel', (m) => {
+    if (!m || typeof m.model !== 'string' || !m.model.endsWith('.glb')) return;
+    const model = {
+      model: m.model,
+      x: Number(m.x) || 0, y: Number(m.y) || 0, z: Number(m.z) || 0,
+      ry: Number(m.ry) || 0,
+      id: (typeof m.id === 'string' && m.id) ? m.id : (Date.now().toString(36) + Math.random().toString(36).substr(2))
+    };
+    activeModels.push(model);
+    io.emit('modelPlaced', model);
+  });
+
+  socket.on('removeModel', (id) => {
+    const idx = activeModels.findIndex(m => m.id === id);
+    if (idx !== -1) {
+      activeModels.splice(idx, 1);
+      io.emit('modelRemoved', id);
     }
   });
 
@@ -336,9 +389,9 @@ io.on('connection', (socket) => {
             const coin = {
               id: coinId,
               x: player.x, y: player.y + 1, z: player.z,
-              vx: (dx / dist) * 15 + (Math.random() - 0.5) * 20,
-              vy: 10 + Math.random() * 15,
-              vz: (dz / dist) * 15 + (Math.random() - 0.5) * 20,
+              vx: (dx / dist) * 6 + (Math.random() - 0.5) * 40,
+              vy: 8 + Math.random() * 18,
+              vz: (dz / dist) * 6 + (Math.random() - 0.5) * 40,
               rx: (Math.random() - 0.5) * 20, ry: (Math.random() - 0.5) * 20, rz: (Math.random() - 0.5) * 20,
               value: i === coinsToSpawn - 1 ? pointsLost - (coinsToSpawn - 1) : 1,
               createdAt: Date.now()

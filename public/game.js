@@ -221,7 +221,7 @@ function updateGroundPlane(body) {
 
   if (groundHit) {
     groundBody.position.y = groundHit.point.y;
-    rayGrounded = (p.y - groundHit.point.y) < 0.7;
+    rayGrounded = (p.y - groundHit.point.y) < 0.95;
   } else {
     groundBody.position.y = -1000;
     rayGrounded = false;
@@ -283,9 +283,9 @@ let lastJoystickTap = 0;
 let tiltX = 0, tiltZ = 0;
 let airTime = 0;
 let lastGroundedTime = 0;
-const COYOTE_TIME = 0.15;
+const COYOTE_TIME = 0.28;
 let jumpBufferTimer = 0;
-const JUMP_BUFFER_TIME = 0.12;
+const JUMP_BUFFER_TIME = 0.25;
 
 // --- Charge jump state ---
 const CHARGE_RATE = 3;
@@ -313,6 +313,7 @@ const activeCoinsList = [];
 const worldPads = [];
 const pendingImpulses = [];
 const worldBuilds = [];
+const worldModels = [];
 
 // --- GPU Particle System (Points-based) ---
 const MAX_PARTICLES = 2000;
@@ -744,7 +745,7 @@ function playWorldSound(sound, position, baseVolume = 1.0) {
   if (dist > MAX_SOUND_DIST) return;
 
   const volume = baseVolume * Math.max(0, 1 - (dist / MAX_SOUND_DIST));
-  sound.volume = volume;
+  sound.volume = Math.min(1, Math.max(0, volume));
 
   if (sound.volume > 0.01) {
     sound.currentTime = 0;
@@ -867,6 +868,17 @@ function returnToMenu() {
   }
   worldBuilds.length = 0;
 
+  for (const wm of worldModels) {
+    scene.remove(wm.group);
+    wm.group.traverse((child) => {
+      if (child.isMesh) {
+        const li = levelMeshes.indexOf(child);
+        if (li !== -1) levelMeshes.splice(li, 1);
+      }
+    });
+  }
+  worldModels.length = 0;
+
   if (machinegunInterval) { clearInterval(machinegunInterval); machinegunInterval = null; }
 
   updateInventoryUI();
@@ -919,42 +931,78 @@ loader.load('/prefabs/item_ped.glb', (gltf) => {
 
 const godmodeMenu = document.createElement('div');
 godmodeMenu.id = 'godmode-menu';
-godmodeMenu.style.cssText = 'position:absolute;top:50px;left:10px;background:rgba(0,0,0,0.8);border:1px solid rgba(255,255,255,0.3);border-radius:8px;padding:10px;font:12px "04b_03",Lato,sans-serif;color:white;z-index:30;display:none;user-select:none;';
+godmodeMenu.style.cssText = 'position:absolute;top:50px;left:10px;background:rgba(0,0,0,0.8);border:1px solid rgba(255,255,255,0.3);border-radius:8px;padding:10px;font:12px "04b_03",Lato,sans-serif;color:white;z-index:30;display:none;user-select:none;max-height:calc(100vh - 70px);overflow-y:auto;';
 godmodeMenu.innerHTML = `
-  <div style="margin-bottom:8px;color:#aaa;letter-spacing:1px;font-size:10px;">PREFABS</div>
-  <div id="gm-tool-spawn" class="gm-tool selected" data-tool="spawn" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬦ Prefab: Player Spawn</div>
-  <div id="gm-tool-ped-green" class="gm-tool" data-tool="pedestal_green" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Prefab: Movement Item</div>
-  <div id="gm-tool-ped-red" class="gm-tool" data-tool="pedestal_red" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Prefab: Weapon Item</div>
-  <div id="gm-tool-ped-yellow" class="gm-tool" data-tool="pedestal_yellow" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Prefab: Build Item</div>
-  <div style="margin-bottom:8px;color:#aaa;letter-spacing:1px;font-size:10px;margin-top:10px;">TOOLS</div>
-  <div id="gm-tool-build-block" class="gm-tool" data-tool="build_mode" data-build="block" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Tool: Build Block</div>
-  <div id="gm-tool-build-wall" class="gm-tool" data-tool="build_mode" data-build="wall" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Tool: Build Wall</div>
-  <div id="gm-tool-build-ramp" class="gm-tool" data-tool="build_mode" data-build="ramp" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Tool: Build Ramp</div>
-  <div id="gm-tool-build-platform" class="gm-tool" data-tool="build_mode" data-build="platform" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Tool: Build Platform</div>
-  <div id="gm-tool-delete" class="gm-tool" data-tool="delete_block" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Tool: Delete Block</div>
-  <div style="margin-bottom:8px;color:#aaa;letter-spacing:1px;font-size:10px;margin-top:10px;">MOVEMENT ITEMS</div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
-    <div class="gm-give" data-item="grapple" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Grapple</div>
-    <div class="gm-give" data-item="launch_pad" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Launch Pad</div>
-    <div class="gm-give" data-item="boost_pad" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Boost Pad</div>
-    <div class="gm-give" data-item="teleporter" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Teleporter</div>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+    <span style="color:#fff;letter-spacing:1px;font-size:11px;">GODMODE</span>
+    <span style="color:#888;font-size:9px;">F4 / Esc to exit</span>
   </div>
-  <div style="margin-bottom:8px;color:#aaa;letter-spacing:1px;font-size:10px;margin-top:10px;">WEAPON ITEMS</div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
-    <div class="gm-give" data-item="machinegun" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Machinegun</div>
-    <div class="gm-give" data-item="rocket" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Rocket</div>
-    <div class="gm-give" data-item="mines" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Mines</div>
-  </div>
-  <div style="margin-bottom:8px;color:#aaa;letter-spacing:1px;font-size:10px;margin-top:10px;">BUILD ITEMS</div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
-    <div class="gm-give" data-item="block" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Block</div>
-    <div class="gm-give" data-item="wall" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Wall</div>
-    <div class="gm-give" data-item="ramp" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Ramp</div>
-    <div class="gm-give" data-item="platform" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Platform</div>
-    <div class="gm-give" data-item="bridge_gun" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Bridge Gun</div>
+  <div style="display:flex;gap:14px;align-items:flex-start;">
+   <div style="flex:1;min-width:150px;">
+    <div style="margin-bottom:8px;color:#aaa;letter-spacing:1px;font-size:10px;">PREFABS</div>
+    <div id="gm-tool-spawn" class="gm-tool selected" data-tool="spawn" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬦ Prefab: Player Spawn</div>
+    <div id="gm-tool-ped-green" class="gm-tool" data-tool="pedestal_green" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Prefab: Movement Item</div>
+    <div id="gm-tool-ped-red" class="gm-tool" data-tool="pedestal_red" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Prefab: Weapon Item</div>
+    <div id="gm-tool-ped-yellow" class="gm-tool" data-tool="pedestal_yellow" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Prefab: Build Item</div>
+    <div style="margin-bottom:8px;color:#aaa;letter-spacing:1px;font-size:10px;margin-top:10px;">TOOLS</div>
+    <div id="gm-tool-build-block" class="gm-tool" data-tool="build_mode" data-build="block" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Tool: Build Block</div>
+    <div id="gm-tool-build-wall" class="gm-tool" data-tool="build_mode" data-build="wall" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Tool: Build Wall</div>
+    <div id="gm-tool-build-ramp" class="gm-tool" data-tool="build_mode" data-build="ramp" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Tool: Build Ramp</div>
+    <div id="gm-tool-build-platform" class="gm-tool" data-tool="build_mode" data-build="platform" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Tool: Build Platform</div>
+    <div id="gm-tool-build-bridge" class="gm-tool" data-tool="build_bridge" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Tool: Build Bridge</div>
+    <div id="gm-tool-build-teleporter" class="gm-tool" data-tool="build_teleporter" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Tool: Build Teleporter</div>
+    <div id="gm-tool-build-channel" class="gm-tool" data-tool="build_channel" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Tool: Build Channel</div>
+    <div id="gm-tool-delete" class="gm-tool" data-tool="delete_block" style="padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;">⬡ Tool: Delete Block</div>
+    <div style="margin-bottom:8px;color:#aaa;letter-spacing:1px;font-size:10px;margin-top:10px;">MODELS</div>
+    <div id="gm-models-list"></div>
+   </div>
+   <div style="flex:1;min-width:150px;">
+    <div style="border-bottom:1px solid rgba(255,255,255,0.25);padding-bottom:6px;margin-bottom:8px;">
+      <div style="color:#7fd0ff;letter-spacing:1px;font-size:10px;">GIVE TO PLAYER</div>
+      <div style="color:#888;font-size:9px;margin-top:2px;">Click an item to add it to your inventory</div>
+    </div>
+    <div style="margin-bottom:8px;color:#aaa;letter-spacing:1px;font-size:10px;">MOVEMENT ITEMS</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
+      <div class="gm-give" data-item="grapple" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Grapple</div>
+      <div class="gm-give" data-item="launch_pad" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Launch Pad</div>
+      <div class="gm-give" data-item="boost_pad" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Boost Pad</div>
+      <div class="gm-give" data-item="teleporter" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Teleporter</div>
+    </div>
+    <div style="margin-bottom:8px;color:#aaa;letter-spacing:1px;font-size:10px;margin-top:10px;">WEAPON ITEMS</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
+      <div class="gm-give" data-item="machinegun" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Machinegun</div>
+      <div class="gm-give" data-item="rocket" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Rocket</div>
+      <div class="gm-give" data-item="mines" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Mines</div>
+    </div>
+    <div style="margin-bottom:8px;color:#aaa;letter-spacing:1px;font-size:10px;margin-top:10px;">BUILD ITEMS</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
+      <div class="gm-give" data-item="block" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Block</div>
+      <div class="gm-give" data-item="wall" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Wall</div>
+      <div class="gm-give" data-item="ramp" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Ramp</div>
+      <div class="gm-give" data-item="platform" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Platform</div>
+      <div class="gm-give" data-item="bridge_gun" style="padding:6px;background:rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;text-align:center;">Bridge Gun</div>
+    </div>
+   </div>
   </div>
 `;
 document.body.appendChild(godmodeMenu);
+
+// Populate placeable models from the server (middle-mouse drag to rotate the ghost before placing)
+fetch('/api/models').then(r => r.json()).then((files) => {
+  const list = document.getElementById('gm-models-list');
+  if (!list) return;
+  if (!files.length) { list.innerHTML = '<div style="color:#666;padding:4px 12px;font-size:10px;">(none)</div>'; return; }
+  for (const f of files) {
+    const name = f.replace(/\.glb$/i, '');
+    const div = document.createElement('div');
+    div.className = 'gm-tool';
+    div.dataset.tool = 'model';
+    div.dataset.model = f;
+    div.style.cssText = 'padding:6px 12px;margin:3px 0;border-radius:4px;cursor:pointer;';
+    div.textContent = '▢ Model: ' + name;
+    list.appendChild(div);
+  }
+}).catch((err) => console.warn('Failed to load model list:', err));
 
 const gmToolStyle = document.createElement('style');
 gmToolStyle.textContent = `
@@ -982,12 +1030,63 @@ godmodeMenu.addEventListener('click', (e) => {
   if (!tool) return;
   godmodeToolSelected = tool.dataset.tool;
   if (tool.dataset.build) godmodeBuildType = tool.dataset.build;
+  if (tool.dataset.model) selectedModel = tool.dataset.model;
+  bridgeStart = null;
+  hideAllGhosts();
   godmodeMenu.querySelectorAll('.gm-tool').forEach(t => t.classList.remove('selected'));
   tool.classList.add('selected');
+  if (godmodeToolSelected === 'build_channel') showToast('Channel: click to add points · scroll = height · Enter = finish · Backspace = undo point · Esc = cancel');
 });
 
 function showGodmodeMenu() { godmodeMenu.style.display = ''; }
 function hideGodmodeMenu() { godmodeMenu.style.display = 'none'; }
+
+function enterGodmode() {
+  if (!localBody) return;
+  godmode = true;
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir);
+  const yaw = Math.atan2(-dir.x, -dir.z);
+  const pitch = Math.asin(Math.max(-1, Math.min(1, dir.y)));
+  camera.rotation.order = 'YXZ';
+  camera.rotation.set(pitch, yaw, 0);
+  localBody.mass = 0;
+  localBody.updateMassProperties();
+  buildPlaneY = Math.round(camera.position.y / 4) * 4 - 4;
+  showSpawnMarkers();
+  showGodmodeMenu();
+  if (document.pointerLockElement) document.exitPointerLock();
+  socket.emit('godmodeEnter');
+}
+
+function exitGodmode() {
+  if (!localBody) return;
+  godmode = false;
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir);
+  const spawnDist = 5;
+  localBody.position.set(
+    camera.position.x + dir.x * spawnDist,
+    camera.position.y + dir.y * spawnDist,
+    camera.position.z + dir.z * spawnDist
+  );
+  localBody.velocity.set(0, 0, 0);
+  localBody.angularVelocity.set(0, 0, 0);
+  localBody.mass = 1;
+  localBody.updateMassProperties();
+  camera.rotation.order = 'XYZ';
+  camera.up.set(0, 1, 0);
+  camera.quaternion.identity();
+  camera.rotation.set(0, 0, 0);
+  if (localPlayer) {
+    const toPlayer = new THREE.Vector3().subVectors(localPlayer.position, camera.position);
+    camYaw = Math.atan2(toPlayer.x, toPlayer.z);
+  }
+  camPitch = 0.4;
+  hideSpawnMarkers();
+  hideGodmodeMenu();
+  hideAllGhosts();
+}
 
 function createPedestalAt(pt, pedId) {
   if (!pedestalTemplate) return null;
@@ -1017,6 +1116,234 @@ function showPedestalMarkers() {
   for (const ped of pedestalMeshes) {
     ped.visible = true;
   }
+}
+
+// --- Placeable models (godmode) ---
+let selectedModel = null;
+const modelTemplates = {};   // filename -> loaded gltf.scene (template)
+const modelGhosts = {};      // filename -> ghost group
+let bridgeStart = null;      // first-click point for the Build Bridge tool
+let teleporterStartA = null; // first-click point for the Build Teleporter tool
+
+// --- Placement undo (godmode: spawn points, pedestals, models) ---
+const MAX_UNDO = 15;
+const placementUndoStack = [];
+function genPlacementId() { return Date.now().toString(36) + Math.random().toString(36).substr(2); }
+function pushUndo(entry) {
+  placementUndoStack.push(entry);
+  if (placementUndoStack.length > MAX_UNDO) placementUndoStack.shift();
+}
+function undoLastPlacement() {
+  const entry = placementUndoStack.pop();
+  if (!entry) { showToast('Cannot undo further'); return; }
+  if (entry.kind === 'spawn') {
+    SPAWN_POINTS = SPAWN_POINTS.filter(p => p !== entry.sp);
+    if (entry.marker) {
+      scene.remove(entry.marker);
+      const idx = spawnMarkers.indexOf(entry.marker);
+      if (idx !== -1) spawnMarkers.splice(idx, 1);
+    }
+    showToast('Undid spawn point');
+  } else if (entry.kind === 'pedestal') {
+    socket.emit('removePedestal', entry.id);
+    showToast('Undid pedestal');
+  } else if (entry.kind === 'model') {
+    socket.emit('removeModel', entry.id);
+    showToast('Undid model');
+  } else if (entry.kind === 'channel') {
+    socket.emit('removeChannel', entry.id);
+    showToast('Undid channel');
+  }
+}
+
+let toastEl = null, toastTimer = null;
+function showToast(msg) {
+  if (!toastEl) {
+    toastEl = document.createElement('div');
+    toastEl.style.cssText = 'position:absolute;bottom:90px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.85);border:1px solid rgba(255,255,255,0.3);border-radius:6px;padding:8px 16px;font:12px "04b_03",Lato,sans-serif;color:#fff;z-index:50;pointer-events:none;opacity:0;transition:opacity 0.2s;';
+    document.body.appendChild(toastEl);
+  }
+  toastEl.textContent = msg;
+  toastEl.style.opacity = '1';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toastEl.style.opacity = '0'; }, 1500);
+}
+
+// --- Build Channel tool (multiclick half-pipe trough) ---
+let channelNodes = [];        // committed THREE.Vector3 polyline points
+let channelHeightOffset = 0;  // scroll-driven vertical offset for the node being placed
+const CHANNEL_RADIUS = 2.5;   // inner radius — diameter 5 fits ~2 players
+const CHANNEL_FACETS = 12;    // arc segments across the half-pipe
+const worldChannels = [];     // { id, group, bodies, meshes }
+
+// Builds the whole channel as a smooth half-pipe swept along a Catmull-Rom curve
+// through the anchor points. The anchors guide the curve; the trough flows
+// gradually between them rather than kinking at each click.
+// Returns { geo: BufferGeometry (absolute coords), segmentPanels: [ [{center,quaternion,hx,hy,hz}, ...], ... ] }.
+function buildChannelGeometry(points, radius) {
+  if (!points || points.length < 2) return null;
+  const curve = new THREE.CatmullRomCurve3(points.map(p => p.clone()), false, 'centripetal', 0.5);
+  const L = curve.getLength();
+  const N = Math.max(2, Math.min(260, Math.ceil(L / 1.5))); // ring spacing ~1.5 units
+  const samples = curve.getSpacedPoints(N);                 // N+1 evenly arc-spaced points
+  const M = samples.length;
+  const K = CHANNEL_FACETS;
+
+  // Per-sample tangent (finite difference) and a non-banking frame (opening faces world-up).
+  const rings = [];
+  const tangents = [];
+  for (let i = 0; i < M; i++) {
+    let T;
+    if (i === 0) T = new THREE.Vector3().subVectors(samples[1], samples[0]);
+    else if (i === M - 1) T = new THREE.Vector3().subVectors(samples[M - 1], samples[M - 2]);
+    else T = new THREE.Vector3().subVectors(samples[i + 1], samples[i - 1]);
+    if (T.lengthSq() < 1e-8) T.set(0, 0, 1);
+    T.normalize();
+    tangents.push(T);
+    let Rt = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), T);
+    if (Rt.lengthSq() < 1e-6) Rt.set(1, 0, 0); else Rt.normalize();
+    const U = new THREE.Vector3().crossVectors(T, Rt).normalize();
+    const ring = [];
+    for (let j = 0; j <= K; j++) {
+      const a = -Math.PI / 2 + (j / K) * Math.PI; // a=0 -> bottom (rides the curve), a=±90° -> top edges
+      ring.push(samples[i].clone()
+        .addScaledVector(Rt, radius * Math.sin(a))
+        .addScaledVector(U, radius * (1 - Math.cos(a))));
+    }
+    rings.push(ring);
+  }
+
+  const positions = [];
+  for (let i = 0; i < M; i++) for (let j = 0; j <= K; j++) { const p = rings[i][j]; positions.push(p.x, p.y, p.z); }
+  const idx = (i, j) => i * (K + 1) + j;
+  const indices = [];
+  for (let i = 0; i < M - 1; i++) for (let j = 0; j < K; j++) {
+    const a0 = idx(i, j), a1 = idx(i + 1, j), b0 = idx(i, j + 1), b1 = idx(i + 1, j + 1);
+    indices.push(a0, a1, b0, a1, b1, b0);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+
+  // Physics: one body per longitudinal slice, K box panels each (broadphase culls distant slices).
+  const segmentPanels = [];
+  for (let i = 0; i < M - 1; i++) {
+    const along = new THREE.Vector3().subVectors(samples[i + 1], samples[i]);
+    const alongLen = along.length();
+    const alongDir = alongLen > 1e-6 ? along.clone().normalize() : tangents[i].clone();
+    const panels = [];
+    for (let j = 0; j < K; j++) {
+      const c0 = rings[i][j], c1 = rings[i][j + 1], c2 = rings[i + 1][j], c3 = rings[i + 1][j + 1];
+      const center = c0.clone().add(c1).add(c2).add(c3).multiplyScalar(0.25);
+      const crossVec = new THREE.Vector3().subVectors(c1, c0);
+      const width = crossVec.length();
+      const crossDir = crossVec.lengthSq() > 1e-8 ? crossVec.clone().normalize() : new THREE.Vector3(1, 0, 0);
+      crossDir.addScaledVector(alongDir, -crossDir.dot(alongDir)); // orthogonalize vs length axis
+      if (crossDir.lengthSq() < 1e-8) crossDir.set(1, 0, 0);
+      crossDir.normalize();
+      const normal = new THREE.Vector3().crossVectors(alongDir, crossDir).normalize();
+      const m = new THREE.Matrix4().makeBasis(alongDir, crossDir, normal);
+      const q = new THREE.Quaternion().setFromRotationMatrix(m);
+      panels.push({ center, quaternion: q, hx: Math.max(alongLen / 2, 0.05), hy: Math.max(width / 2, 0.05), hz: 0.15 });
+    }
+    segmentPanels.push(panels);
+  }
+  return { geo, segmentPanels };
+}
+
+const channelGhostMat = new THREE.MeshBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide });
+const channelGhostGroup = new THREE.Group();
+scene.add(channelGhostGroup);
+const channelNodeMarkerGeo = new THREE.SphereGeometry(0.35, 8, 8);
+const channelNodeMarkerMat = new THREE.MeshBasicMaterial({ color: 0xffff44 });
+
+function clearChannelGhost() {
+  for (let i = channelGhostGroup.children.length - 1; i >= 0; i--) {
+    const c = channelGhostGroup.children[i];
+    if (c.userData.disposeGeo && c.geometry) c.geometry.dispose();
+    channelGhostGroup.remove(c);
+  }
+}
+function rebuildChannelGhost(points) {
+  clearChannelGhost();
+  for (let i = 0; i < points.length - 1; i++) {
+    const data = channelSegmentGeometry(points[i], points[i + 1], CHANNEL_RADIUS);
+    if (!data) continue;
+    const mesh = new THREE.Mesh(data.geo, channelGhostMat);
+    mesh.userData.disposeGeo = true;
+    channelGhostGroup.add(mesh);
+  }
+  for (const p of points) {
+    const mk = new THREE.Mesh(channelNodeMarkerGeo, channelNodeMarkerMat);
+    mk.position.copy(p);
+    channelGhostGroup.add(mk);
+  }
+  channelGhostGroup.visible = points.length > 0;
+}
+function resetChannelDraft() {
+  channelNodes = [];
+  channelHeightOffset = 0;
+  clearChannelGhost();
+  channelGhostGroup.visible = false;
+}
+function finishChannel() {
+  if (channelNodes.length < 2) { resetChannelDraft(); return; }
+  const id = genPlacementId();
+  socket.emit('placeChannel', {
+    id,
+    nodes: channelNodes.map(p => ({ x: +p.x.toFixed(2), y: +p.y.toFixed(2), z: +p.z.toFixed(2) })),
+    radius: CHANNEL_RADIUS
+  });
+  pushUndo({ kind: 'channel', id });
+  showToast(`Channel placed (${channelNodes.length} nodes)`);
+  resetChannelDraft();
+}
+
+function loadModelTemplate(filename) {
+  return new Promise((resolve) => {
+    if (modelTemplates[filename]) { resolve(modelTemplates[filename]); return; }
+    loader.load('/models/' + filename, (gltf) => {
+      gltf.scene.traverse((child) => {
+        if (child.isMesh) { child.castShadow = true; child.receiveShadow = true; }
+      });
+      modelTemplates[filename] = gltf.scene;
+      resolve(gltf.scene);
+    }, undefined, (err) => { console.warn('Failed to load model:', filename, err); resolve(null); });
+  });
+}
+
+function createModelAt(m) {
+  loadModelTemplate(m.model).then((template) => {
+    if (!template) return;
+    const group = template.clone();
+    group.position.set(m.x, m.y, m.z);
+    group.rotation.y = m.ry || 0;
+    group.userData.modelId = m.id;
+    group.traverse((child) => {
+      if (child.isMesh) {
+        child.castShadow = true;
+        child.receiveShadow = false; // avoid self-shadow acne (scanline artifacts)
+        addLevelCollider(child);
+      }
+    });
+    scene.add(group);
+    worldModels.push({ id: m.id, group });
+  });
+}
+
+function removeModelById(id) {
+  const idx = worldModels.findIndex(wm => wm.id === id);
+  if (idx === -1) return;
+  const wm = worldModels[idx];
+  wm.group.traverse((child) => {
+    if (child.isMesh) {
+      const li = levelMeshes.indexOf(child);
+      if (li !== -1) levelMeshes.splice(li, 1);
+    }
+  });
+  scene.remove(wm.group);
+  worldModels.splice(idx, 1);
 }
 
 // --- Godmode hover preview ---
@@ -1075,15 +1402,39 @@ function createGhostPedestal() {
 let ghostSpawn = null;
 let ghostPedestal = null;
 
+function createGhostModel(filename) {
+  if (modelGhosts[filename]) return modelGhosts[filename];
+  const group = new THREE.Group();
+  group.visible = false;
+  scene.add(group);
+  modelGhosts[filename] = group;
+  loadModelTemplate(filename).then((template) => {
+    if (!template) return;
+    const clone = template.clone();
+    clone.traverse((child) => {
+      if (child.isMesh) { child.material = ghostBlueMat.clone(); child.castShadow = false; child.receiveShadow = false; }
+    });
+    group.add(clone);
+  });
+  return group;
+}
+
 function getGhost() {
   if (godmodeToolSelected === 'spawn') {
     if (!ghostSpawn) ghostSpawn = createGhostSpawn();
     if (ghostPedestal) ghostPedestal.visible = false;
+    for (const f in modelGhosts) modelGhosts[f].visible = false;
     return ghostSpawn;
   } else if (godmodeToolSelected.startsWith('pedestal')) {
     if (!ghostPedestal) ghostPedestal = createGhostPedestal();
     if (ghostSpawn) ghostSpawn.visible = false;
+    for (const f in modelGhosts) modelGhosts[f].visible = false;
     return ghostPedestal;
+  } else if (godmodeToolSelected === 'model' && selectedModel) {
+    if (ghostSpawn) ghostSpawn.visible = false;
+    if (ghostPedestal) ghostPedestal.visible = false;
+    for (const f in modelGhosts) if (f !== selectedModel) modelGhosts[f].visible = false;
+    return createGhostModel(selectedModel);
   }
 }
 
@@ -1152,6 +1503,50 @@ function updateGodmodeHover(mouseX, mouseY) {
 
   const ghost = getGhost();
 
+  if (godmodeToolSelected === 'build_bridge') {
+    clearHoverHighlight();
+    const hits = hoverRaycaster.intersectObjects([...levelMeshes, ...worldBuilds.map(b => b.mesh)], false);
+    if (hits.length === 0) { bridgeGhost.visible = false; return; }
+    const hoverPt = hits[0].point.clone();
+    if (!bridgeStart) { bridgeGhost.visible = false; return; }
+    const target = hoverPt.clone();
+    let dist = bridgeStart.distanceTo(target);
+    if (dist < 0.5) { bridgeGhost.visible = false; return; }
+    const mid = bridgeStart.clone().lerp(target, 0.5);
+    const dir = new THREE.Vector3().subVectors(target, bridgeStart).normalize();
+    bridgeGhost.scale.set(1, 1, dist);
+    bridgeGhost.position.copy(mid);
+    bridgeGhost.rotation.order = 'YXZ';
+    bridgeGhost.rotation.set(-Math.asin(dir.y), Math.atan2(dir.x, dir.z), 0);
+    bridgeGhost.visible = true;
+    return;
+  }
+
+  if (godmodeToolSelected === 'build_teleporter') {
+    clearHoverHighlight();
+    teleporterGhostA.visible = !!teleporterStartA;
+    if (teleporterStartA) teleporterGhostA.position.copy(teleporterStartA);
+    const hits = hoverRaycaster.intersectObjects(levelMeshes, false);
+    if (hits.length === 0) { teleporterGhostB.visible = false; return; }
+    teleporterGhostB.position.copy(hits[0].point);
+    teleporterGhostB.visible = true;
+    return;
+  }
+
+  if (godmodeToolSelected === 'build_channel') {
+    clearHoverHighlight();
+    const hits = hoverRaycaster.intersectObjects([...levelMeshes, ...worldBuilds.map(b => b.mesh)], false);
+    if (hits.length === 0) {
+      if (channelNodes.length) rebuildChannelGhost(channelNodes);
+      else channelGhostGroup.visible = false;
+      return;
+    }
+    const candidate = hits[0].point.clone();
+    candidate.y += channelHeightOffset;
+    rebuildChannelGhost([...channelNodes, candidate]);
+    return;
+  }
+
   // Check for existing items to highlight for deletion
   if (godmodeToolSelected === 'spawn') {
     const markerHits = hoverRaycaster.intersectObjects(spawnMarkers, false);
@@ -1169,6 +1564,17 @@ function updateGodmodeHover(mouseX, mouseY) {
       let hitObj = pedHits[0].object;
       while (hitObj.parent && !hitObj.userData.pedestalId) hitObj = hitObj.parent;
       if (hitObj.userData.pedestalId && hoveredExisting !== hitObj) highlightForDelete(hitObj);
+      if (ghost) ghost.visible = false;
+      return;
+    }
+  } else if (godmodeToolSelected === 'model') {
+    const modelChildren = [];
+    for (const wm of worldModels) wm.group.traverse(c => { if (c.isMesh) modelChildren.push(c); });
+    const modelHits = hoverRaycaster.intersectObjects(modelChildren, false);
+    if (modelHits.length > 0) {
+      let hitObj = modelHits[0].object;
+      while (hitObj.parent && !hitObj.userData.modelId) hitObj = hitObj.parent;
+      if (hitObj.userData.modelId && hoveredExisting !== hitObj) highlightForDelete(hitObj);
       if (ghost) ghost.visible = false;
       return;
     }
@@ -1214,6 +1620,14 @@ function updateGodmodeHover(mouseX, mouseY) {
       ghost.visible = true;
       setGhostColor(ghost, ghostCanPlace);
     }
+  } else if (godmodeToolSelected === 'model') {
+    ghostCanPlace = flatness >= FLATNESS_THRESHOLD;
+    if (ghost) {
+      ghost.position.set(hit.point.x, hit.point.y, hit.point.z);
+      ghost.rotation.y = ghostRotationY;
+      ghost.visible = true;
+      setGhostColor(ghost, ghostCanPlace);
+    }
   }
 }
 
@@ -1251,6 +1665,15 @@ const bridgeGhostMat = new THREE.MeshBasicMaterial({ color: 0x00ffff, transparen
 const bridgeGhost = new THREE.Mesh(new THREE.BoxGeometry(4, 0.2, 1), bridgeGhostMat);
 bridgeGhost.visible = false;
 scene.add(bridgeGhost);
+
+const teleporterGhostMat = new THREE.MeshBasicMaterial({ color: 0x44ff44, transparent: true, opacity: 0.5, depthWrite: false });
+const teleporterGhostGeo = new THREE.CylinderGeometry(0.8, 0.8, 0.2, 16);
+const teleporterGhostA = new THREE.Mesh(teleporterGhostGeo, teleporterGhostMat);
+const teleporterGhostB = new THREE.Mesh(teleporterGhostGeo, teleporterGhostMat);
+teleporterGhostA.visible = false;
+teleporterGhostB.visible = false;
+scene.add(teleporterGhostA);
+scene.add(teleporterGhostB);
 
 const gridPointsGeo = new THREE.BufferGeometry();
 const gridPts = [];
@@ -1295,11 +1718,17 @@ renderer.domElement.addEventListener('mousemove', (e) => {
 function hideAllGhosts() {
   if (ghostSpawn) ghostSpawn.visible = false;
   if (ghostPedestal) ghostPedestal.visible = false;
+  for (const f in modelGhosts) modelGhosts[f].visible = false;
   clearHoverHighlight();
   if (buildGhost) buildGhost.visible = false;
   if (buildGrid) buildGrid.visible = false;
   if (groundGrid) groundGrid.visible = false;
   if (bridgeGhost) bridgeGhost.visible = false;
+  if (teleporterGhostA) teleporterGhostA.visible = false;
+  if (teleporterGhostB) teleporterGhostB.visible = false;
+  bridgeStart = null;
+  teleporterStartA = null;
+  resetChannelDraft();
 }
 
 // --- Spawn editor state ---
@@ -2567,6 +2996,18 @@ document.addEventListener('mousemove', (e) => {
 
 window.addEventListener('wheel', (e) => {
   if (!gameStarted) return;
+  if (godmode && godmodeToolSelected === 'build_channel') {
+    channelHeightOffset += (e.deltaY > 0 ? -1 : 1) * 0.5;
+    showToast('Channel height: ' + channelHeightOffset.toFixed(1));
+    updateGodmodeHover(lastHoverX, lastHoverY);
+    return;
+  }
+  if (godmode && (godmodeToolSelected === 'model' || godmodeToolSelected === 'spawn' || godmodeToolSelected.startsWith('pedestal'))) {
+    ghostRotationY += (e.deltaY > 0 ? 1 : -1) * (Math.PI / 8);
+    const ghost = getGhost();
+    if (ghost) ghost.rotation.y = ghostRotationY;
+    return;
+  }
   const isBuilding = (!godmode && inventory.length > 0 && ['block', 'wall', 'ramp', 'platform'].includes(inventory[0].type)) || (godmode && godmodeToolSelected === 'build_mode');
   if (isBuilding) {
     if (godmode) {
@@ -2650,7 +3091,8 @@ renderer.domElement.addEventListener('click', (e) => {
     const pt = hits[0].point;
     const newSp = { x: parseFloat(pt.x.toFixed(2)), y: parseFloat(pt.y.toFixed(2)), z: parseFloat(pt.z.toFixed(2)) };
     SPAWN_POINTS.push(newSp);
-    createSpawnMarker(newSp);
+    const spMarker = createSpawnMarker(newSp);
+    pushUndo({ kind: 'spawn', sp: newSp, marker: spMarker });
     console.log(`SPAWN POINT ADDED: { x: ${newSp.x}, y: ${newSp.y}, z: ${newSp.z} } — ${SPAWN_POINTS.length} total`);
 
   } else if (godmodeToolSelected.startsWith('pedestal')) {
@@ -2676,9 +3118,74 @@ renderer.domElement.addEventListener('click', (e) => {
     if (hits.length === 0) return;
     const pt = hits[0].point;
     const type = godmodeToolSelected.replace('pedestal_', '');
-    const pos = { x: parseFloat(pt.x.toFixed(2)), y: parseFloat(pt.y.toFixed(2)), z: parseFloat(pt.z.toFixed(2)), ry: parseFloat(ghostRotationY.toFixed(2)), type };
+    const pedId = genPlacementId();
+    const pos = { id: pedId, x: parseFloat(pt.x.toFixed(2)), y: parseFloat(pt.y.toFixed(2)), z: parseFloat(pt.z.toFixed(2)), ry: parseFloat(ghostRotationY.toFixed(2)), type };
     socket.emit('placePedestal', pos);
+    pushUndo({ kind: 'pedestal', id: pedId });
     console.log(`PEDESTAL PLACED: { x: ${pos.x}, y: ${pos.y}, z: ${pos.z} }`);
+  } else if (godmodeToolSelected === 'model') {
+    // Click an existing placed model to remove it
+    const modelChildren = [];
+    for (const wm of worldModels) wm.group.traverse(c => { if (c.isMesh) modelChildren.push(c); });
+    const modelHits = spawnClickRaycaster.intersectObjects(modelChildren, false);
+    if (modelHits.length > 0) {
+      let hitObj = modelHits[0].object;
+      while (hitObj.parent && !hitObj.userData.modelId) hitObj = hitObj.parent;
+      if (hitObj.userData.modelId) { socket.emit('removeModel', hitObj.userData.modelId); return; }
+    }
+
+    if (!selectedModel || !ghostCanPlace) return;
+    if (now - spawnClickCooldown < 0.5) return;
+    spawnClickCooldown = now;
+
+    const hits = spawnClickRaycaster.intersectObjects(levelMeshes, false);
+    if (hits.length === 0) return;
+    const pt = hits[0].point;
+    const modelId = genPlacementId();
+    const pos = { id: modelId, model: selectedModel, x: parseFloat(pt.x.toFixed(2)), y: parseFloat(pt.y.toFixed(2)), z: parseFloat(pt.z.toFixed(2)), ry: parseFloat(ghostRotationY.toFixed(3)) };
+    socket.emit('placeModel', pos);
+    pushUndo({ kind: 'model', id: modelId });
+    console.log(`MODEL PLACED: ${selectedModel} { x: ${pos.x}, y: ${pos.y}, z: ${pos.z} }`);
+  } else if (godmodeToolSelected === 'build_bridge') {
+    const hits = spawnClickRaycaster.intersectObjects([...levelMeshes, ...worldBuilds.map(b => b.mesh)], false);
+    if (hits.length === 0) return;
+    const pt = hits[0].point.clone();
+    if (!bridgeStart) {
+      bridgeStart = pt;
+      console.log(`BRIDGE START: { x: ${pt.x.toFixed(2)}, y: ${pt.y.toFixed(2)}, z: ${pt.z.toFixed(2)} }`);
+      return;
+    }
+    const target = pt;
+    let dist = bridgeStart.distanceTo(target);
+    if (dist < 0.5) { bridgeStart = null; bridgeGhost.visible = false; return; }
+    const mid = bridgeStart.clone().lerp(target, 0.5);
+    const dir = new THREE.Vector3().subVectors(target, bridgeStart).normalize();
+    socket.emit('placeBuild', { type: 'bridge', x: mid.x, y: mid.y, z: mid.z, ry: Math.atan2(dir.x, dir.z), rx: -Math.asin(dir.y), length: dist });
+    console.log(`BRIDGE PLACED: length ${dist.toFixed(2)}`);
+    bridgeStart = null;
+    bridgeGhost.visible = false;
+  } else if (godmodeToolSelected === 'build_teleporter') {
+    const hits = spawnClickRaycaster.intersectObjects(levelMeshes, false);
+    if (hits.length === 0) return;
+    const pt = hits[0].point.clone();
+    if (!teleporterStartA) {
+      teleporterStartA = pt;
+      console.log(`TELEPORTER A: { x: ${pt.x.toFixed(2)}, y: ${pt.y.toFixed(2)}, z: ${pt.z.toFixed(2)} }`);
+      return;
+    }
+    socket.emit('placeTeleporter', { a: teleporterStartA, b: pt });
+    console.log(`TELEPORTER PLACED`);
+    teleporterStartA = null;
+    teleporterGhostA.visible = false;
+    teleporterGhostB.visible = false;
+  } else if (godmodeToolSelected === 'build_channel') {
+    const hits = spawnClickRaycaster.intersectObjects([...levelMeshes, ...worldBuilds.map(b => b.mesh)], false);
+    if (hits.length === 0) return;
+    const pt = hits[0].point.clone();
+    pt.y += channelHeightOffset;
+    channelNodes.push(pt);
+    rebuildChannelGhost(channelNodes);
+    console.log(`CHANNEL NODE ${channelNodes.length}: { x: ${pt.x.toFixed(2)}, y: ${pt.y.toFixed(2)}, z: ${pt.z.toFixed(2)} }`);
   } else if (godmodeToolSelected === 'delete_block') {
     const buildMeshes = worldBuilds.map(b => b.mesh);
     const buildHits = spawnClickRaycaster.intersectObjects(buildMeshes, false);
@@ -3064,7 +3571,7 @@ socket.on('itemPickedUp', (item) => {
 
 function addTeleporterToWorld(t) {
   const geo = new THREE.CylinderGeometry(0.8, 0.8, 0.2, 16);
-  const mat = new THREE.MeshStandardMaterial({ color: 0x44ff44, emissive: 0x228822 });
+  const mat = new THREE.MeshStandardMaterial({ color: 0x33ccff, emissive: 0x0a6699, emissiveIntensity: 0.8 });
   const meshA = new THREE.Mesh(geo, mat.clone());
   const meshB = new THREE.Mesh(geo, mat.clone());
   const posA = new THREE.Vector3(t.a.x, t.a.y, t.a.z);
@@ -3150,6 +3657,59 @@ function addBuildToWorld(b) {
   world.addBody(body);
   worldBuilds.push({ id: b.id, mesh, body });
 }
+socket.on('currentModels', (ms) => {
+  for (const wm of worldModels) scene.remove(wm.group);
+  worldModels.length = 0;
+  for (const m of ms) createModelAt(m);
+});
+socket.on('modelPlaced', (m) => createModelAt(m));
+socket.on('modelRemoved', (id) => removeModelById(id));
+
+const channelMat = new THREE.MeshStandardMaterial({ color: 0x6f8aa6, roughness: 0.55, metalness: 0.15, side: THREE.DoubleSide });
+function addChannelToWorld(c) {
+  const group = new THREE.Group();
+  const bodies = [];
+  const meshes = [];
+  const pts = c.nodes.map(n => new THREE.Vector3(n.x, n.y, n.z));
+  const radius = c.radius || CHANNEL_RADIUS;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const data = channelSegmentGeometry(pts[i], pts[i + 1], radius);
+    if (!data) continue;
+    const mesh = new THREE.Mesh(data.geo, channelMat);
+    mesh.castShadow = true; mesh.receiveShadow = true;
+    mesh.userData.channelId = c.id;
+    group.add(mesh);
+    addLevelCollider(mesh);
+    meshes.push(mesh);
+    const body = new CANNON.Body({ mass: 0, material: groundMaterial });
+    for (const p of data.panels) {
+      body.addShape(
+        new CANNON.Box(new CANNON.Vec3(p.hx, p.hy, p.hz)),
+        new CANNON.Vec3(p.center.x, p.center.y, p.center.z),
+        new CANNON.Quaternion(p.quaternion.x, p.quaternion.y, p.quaternion.z, p.quaternion.w)
+      );
+    }
+    world.addBody(body);
+    bodies.push(body);
+  }
+  scene.add(group);
+  worldChannels.push({ id: c.id, group, bodies, meshes });
+}
+socket.on('currentChannels', (cs) => { for (const c of cs) addChannelToWorld(c); });
+socket.on('channelPlaced', (c) => addChannelToWorld(c));
+socket.on('channelRemoved', (id) => {
+  const idx = worldChannels.findIndex(c => c.id === id);
+  if (idx === -1) return;
+  const c = worldChannels[idx];
+  scene.remove(c.group);
+  for (const b of c.bodies) world.removeBody(b);
+  for (const m of c.meshes) {
+    const li = levelMeshes.indexOf(m); if (li !== -1) levelMeshes.splice(li, 1);
+    if (m.geometry) m.geometry.dispose();
+  }
+  worldChannels.splice(idx, 1);
+});
+
 socket.on('currentBuilds', (bs) => { for (const b of bs) addBuildToWorld(b); });
 socket.on('buildPlaced', (b) => addBuildToWorld(b));
 socket.on('buildRemoved', (id) => {
@@ -3215,12 +3775,12 @@ socket.on('explosion', (pos) => {
       if (isMine) {
         dir.y = Math.max(0.3, dir.y + 0.4);
         dir.normalize();
-        const force = (blastRadius - dist) * 18;
+        const force = (blastRadius - dist) * 9;
         pendingImpulses.push({ dir, force, popY: 1.0 });
       } else {
         dir.y = Math.max(0.5, dir.y + 1.0);
         dir.normalize();
-        const force = (blastRadius - dist) * 14;
+        const force = (blastRadius - dist) * 7;
         pendingImpulses.push({ dir, force, popY: 1.5 });
       }
     }
@@ -3505,45 +4065,29 @@ window.addEventListener('keydown', (e) => {
   }
   if (e.code === 'F4' && gameStarted) {
     e.preventDefault();
-    godmode = !godmode;
-    if (godmode && localBody) {
-      const dir = new THREE.Vector3();
-      camera.getWorldDirection(dir);
-      const yaw = Math.atan2(-dir.x, -dir.z);
-      const pitch = Math.asin(Math.max(-1, Math.min(1, dir.y)));
-      camera.rotation.order = 'YXZ';
-      camera.rotation.set(pitch, yaw, 0);
-      localBody.mass = 0;
-      localBody.updateMassProperties();
-      buildPlaneY = Math.round(camera.position.y / 4) * 4 - 4;
-      showSpawnMarkers();
-      showGodmodeMenu();
-      if (document.pointerLockElement) document.exitPointerLock();
-      socket.emit('godmodeEnter');
-    } else if (!godmode && localBody) {
-      const dir = new THREE.Vector3();
-      camera.getWorldDirection(dir);
-      const spawnDist = 5;
-      localBody.position.set(
-        camera.position.x + dir.x * spawnDist,
-        camera.position.y + dir.y * spawnDist,
-        camera.position.z + dir.z * spawnDist
-      );
-      localBody.velocity.set(0, 0, 0);
-      localBody.angularVelocity.set(0, 0, 0);
-      localBody.mass = 1;
-      localBody.updateMassProperties();
-      camera.rotation.order = 'XYZ';
-      camera.up.set(0, 1, 0);
-      camera.quaternion.identity();
-      camera.rotation.set(0, 0, 0);
-      const toPlayer = new THREE.Vector3().subVectors(localPlayer.position, camera.position);
-      camYaw = Math.atan2(toPlayer.x, toPlayer.z);
-      camPitch = 0.4;
-      hideSpawnMarkers();
-      hideGodmodeMenu();
-      hideAllGhosts();
-    }
+    if (!godmode) enterGodmode();
+    else if (godmodeMenu.style.display === 'none') showGodmodeMenu(); // reopen menu, stay in godmode
+    else exitGodmode();
+  }
+  if (e.code === 'Escape' && gameStarted && godmode) {
+    e.preventDefault();
+    if (godmodeToolSelected === 'build_channel' && channelNodes.length > 0) {
+      resetChannelDraft(); showToast('Channel cancelled');       // cancel in-progress channel first
+    } else if (godmodeMenu.style.display !== 'none') hideGodmodeMenu(); // first Esc: just close the menu
+    else exitGodmode();                                          // second Esc: fully exit to player
+  }
+  if (e.code === 'Enter' && gameStarted && godmode && godmodeToolSelected === 'build_channel') {
+    e.preventDefault();
+    finishChannel();
+  }
+  if (e.code === 'Backspace' && gameStarted && godmode && godmodeToolSelected === 'build_channel' && channelNodes.length > 0) {
+    e.preventDefault();
+    channelNodes.pop();
+    rebuildChannelGhost(channelNodes);
+  }
+  if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ' && gameStarted && godmode) {
+    e.preventDefault();
+    undoLastPlacement();
   }
   if (e.code === 'BracketRight') { BASE_CHAIN_LENGTH = Math.min(20, BASE_CHAIN_LENGTH + 0.5); }
   if (e.code === 'BracketLeft') { BASE_CHAIN_LENGTH = Math.max(2, BASE_CHAIN_LENGTH - 0.5); }
@@ -3551,7 +4095,7 @@ window.addEventListener('keydown', (e) => {
     const isBuilding = (!godmode && inventory.length > 0 && ['block', 'wall', 'ramp', 'platform'].includes(inventory[0].type)) || (godmode && godmodeToolSelected === 'build_mode');
     if (isBuilding) {
       buildRotationSteps = (buildRotationSteps + 1) % 4;
-    } else if (godmode && (godmodeToolSelected === 'spawn' || godmodeToolSelected.startsWith('pedestal'))) {
+    } else if (godmode && (godmodeToolSelected === 'spawn' || godmodeToolSelected.startsWith('pedestal') || godmodeToolSelected === 'model')) {
       ghostRotationY += Math.PI / 8;
       const ghost = getGhost();
       if (ghost) ghost.rotation.y = ghostRotationY;
@@ -3819,7 +4363,13 @@ function animate() {
     // Player item ghosting
     if (localPlayer) {
       const item = isBuilding ? (godmode ? godmodeBuildType : inventory[0].type) : (inventory.length > 0 ? inventory[0].type : null);
-      if (['mines', 'launch_pad', 'boost_pad'].includes(item)) {
+      if (godmode && (godmodeToolSelected === 'build_bridge' || godmodeToolSelected === 'build_teleporter' || godmodeToolSelected === 'build_channel')) {
+        playerGhost.visible = false;
+        buildGrid.visible = false;
+        groundGrid.visible = false;
+        buildGhost.visible = false;
+        // bridge/teleporter/channel ghosts are driven by updateGodmodeHover
+      } else if (['mines', 'launch_pad', 'boost_pad'].includes(item)) {
         buildGrid.visible = false;
         groundGrid.visible = false;
         buildGhost.visible = false;
@@ -3991,10 +4541,16 @@ function animate() {
   // --- WORLD ENTITY UPDATES (Always run, even in main menu) ---
 
     for (const wt of worldTeleporters) {
-      for (let i = 0; i < 2; i++) {
-        const t = Math.random();
-        const p = new THREE.Vector3().lerpVectors(wt.a, wt.b, t);
-        spawnParticle(p.x, p.y + Math.random() * 0.5, p.z, (Math.random() - 0.5) * 0.5, Math.random(), (Math.random() - 0.5) * 0.5, 0.2, 1.0, 0.2, 0.7, 3, 0.6, 0);
+      for (const pad of [wt.a, wt.b]) {
+        for (let i = 0; i < 3; i++) {
+          const ang = Math.random() * Math.PI * 2;
+          const rad = 0.45 + Math.random() * 0.35;
+          const ox = Math.cos(ang) * rad, oz = Math.sin(ang) * rad;
+          // bright cyan-white core spark, thin and fast-rising
+          const cool = Math.random() < 0.5;
+          const r = cool ? 0.45 : 0.8, g = cool ? 0.85 : 0.95, b = 1.0;
+          spawnParticle(pad.x + ox, pad.y + Math.random() * 0.15, pad.z + oz, ox * 0.6, 2.8 + Math.random() * 2.8, oz * 0.6, r, g, b, 0.95, 0.4 + Math.random() * 0.3, 0.3 + Math.random() * 0.2, 0);
+        }
       }
     }
 
