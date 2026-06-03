@@ -440,20 +440,8 @@ function updateGroundPlane(body) {
   const groundHit = raycastLevel(groundOrigin, new THREE.Vector3(0, -1, 0), 50);
 
   if (groundHit) {
-    const surfaceY = groundHit.point.y;
-    groundBody.position.y = surfaceY;
-    // Anti-sink backup: the Cannon ground plane doesn't reliably eject a body
-    // that is already embedded in the floor (e.g. spawned with its centre on the
-    // surface, or shoved down by the ceiling clamp). Lift it back out here.
-    // Capped to a small penetration so we never yank a player up onto a platform
-    // they are legitimately standing beneath.
-    const restY = surfaceY + PLAYER_RADIUS;
-    const penetration = restY - p.y;
-    if (penetration > 0.02 && penetration < 1.2) {
-      p.y = restY;
-      if (body.velocity.y < 0) body.velocity.y = 0;
-    }
-    rayGrounded = (p.y - surfaceY) < 0.95;
+    groundBody.position.y = groundHit.point.y;
+    rayGrounded = (p.y - groundHit.point.y) < 0.7;
   } else {
     groundBody.position.y = -1000;
     rayGrounded = false;
@@ -469,56 +457,31 @@ function resolveWallCollisions(body) {
     new THREE.Vector3(1, 0, -1).normalize(), new THREE.Vector3(-1, 0, -1).normalize()
   ];
 
-  // Resolve walls one penetration at a time (deepest first). Summing all 8
-  // directions at once pins the player in corners; iterating the single worst
-  // overlap lets them slide along surfaces instead of getting stuck.
-  const reach = PLAYER_RADIUS + 0.05;
-  for (let pass = 0; pass < 3; pass++) {
-    const wallOrigin = new THREE.Vector3(p.x, p.y, p.z);
-    let bestDir = null, bestPush = 0;
-    for (const dir of wallDirs) {
-      const hit = raycastLevel(wallOrigin, dir, reach, true);
-      if (hit) {
-        const pushDist = reach - hit.distance;
-        if (pushDist > bestPush) { bestPush = pushDist; bestDir = dir; }
+  const wallOrigin = new THREE.Vector3(p.x, p.y, p.z);
+  for (const dir of wallDirs) {
+    const hit = raycastLevel(wallOrigin, dir, PLAYER_RADIUS + 0.05, true);
+    if (hit) {
+      const pushDist = PLAYER_RADIUS + 0.05 - hit.distance;
+      p.x -= dir.x * pushDist;
+      p.z -= dir.z * pushDist;
+      const velDot = body.velocity.x * dir.x + body.velocity.z * dir.z;
+      if (velDot > 0) {
+        body.velocity.x -= dir.x * velDot;
+        body.velocity.z -= dir.z * velDot;
       }
-    }
-    if (!bestDir) break;
-    p.x -= bestDir.x * bestPush;
-    p.z -= bestDir.z * bestPush;
-    const velDot = body.velocity.x * bestDir.x + body.velocity.z * bestDir.z;
-    if (velDot > 0) {
-      body.velocity.x -= bestDir.x * velDot;
-      body.velocity.z -= bestDir.z * velDot;
     }
   }
 
-  // Ceiling collision — the player has already been moved by world.step before
-  // this runs, so a fast jump can land them ABOVE the ceiling and a ray cast up
-  // from there sees nothing. Instead we sweep from where the body was this frame
-  // (previousPosition) up through where it is now, so the whole jump arc is
-  // covered. Multiple offset rays catch sloped ceilings a single centre ray
-  // would slip past.
-  const prevY = (body.previousPosition && isFinite(body.previousPosition.y)) ? body.previousPosition.y : p.y;
-  const movedUp = Math.max(0, p.y - prevY);
-  const velLook = Math.max(0, body.velocity.y) * PHYSICS_STEP;
-  const ceilReach = PLAYER_RADIUS + 0.3 + movedUp + velLook;
-  const r = PLAYER_RADIUS * 0.7;
-  const ceilOffsets = [[0, 0], [r, 0], [-r, 0], [0, r], [0, -r]];
-  let nearestCeil = null;
-  for (const [ox, oz] of ceilOffsets) {
-    const o = new THREE.Vector3(p.x + ox, prevY, p.z + oz);
-    const h = raycastLevel(o, new THREE.Vector3(0, 1, 0), ceilReach, true);
-    if (h && (!nearestCeil || h.distance < nearestCeil.distance)) nearestCeil = h;
-  }
-  if (nearestCeil) {
-    const clampY = nearestCeil.point.y - PLAYER_RADIUS - 0.1;
-    // Never let the ceiling clamp shove the player below the floor (that strands
-    // them inside the terrain). If the gap is too tight, skip the clamp.
-    const minY = groundBody.position.y + PLAYER_RADIUS;
-    if (p.y > clampY && clampY >= minY) {
-      p.y = clampY;
-      if (body.velocity.y > 0) body.velocity.y = 0;
+  // Ceiling collision — prevent jumping through ceilings
+  const ceilOrigin = new THREE.Vector3(p.x, p.y + 0.3, p.z);
+  const ceilHit = raycastLevel(ceilOrigin, new THREE.Vector3(0, 1, 0), PLAYER_RADIUS + 0.5, true);
+  if (ceilHit) {
+    const headroom = ceilHit.distance;
+    if (headroom < PLAYER_RADIUS + 0.1) {
+      p.y = ceilHit.point.y - PLAYER_RADIUS - 0.1;
+    }
+    if (body.velocity.y > 0) {
+      body.velocity.y = 0;
     }
   }
 }
