@@ -436,12 +436,39 @@ function raycastLevel(origin, direction, maxDist, skipThin) {
 
 function updateGroundPlane(body) {
   const p = body.position;
-  const groundOrigin = new THREE.Vector3(p.x, p.y + 2, p.z);
-  const groundHit = raycastLevel(groundOrigin, new THREE.Vector3(0, -1, 0), 50);
+  // Cast down to find the floor we're standing on. The ray starts ABOVE the
+  // player's centre so we can still find a floor when slightly embedded, but
+  // that means a plane the player has walked UNDER (a channel/overhang) would be
+  // the first thing the ray hits going down. We must NOT treat such a surface as
+  // the floor: the moving Cannon ground plane is a solid half-space, so snapping
+  // it onto a surface above the player's centre ejects the player UP through it
+  // (the "pushed onto the top of the plane" bug). So we skip every hit at or
+  // above the centre and pick the highest surface that is genuinely below us.
+  raycaster.set(new THREE.Vector3(p.x, p.y + 2, p.z), new THREE.Vector3(0, -1, 0));
+  raycaster.far = 50;
+  const hits = raycaster.intersectObjects(levelMeshes, false);
+  let surfaceY = null;
+  for (const h of hits) {
+    if (h.point.y <= p.y + 0.05) { surfaceY = h.point.y; break; }
+  }
 
-  if (groundHit) {
-    groundBody.position.y = groundHit.point.y;
-    rayGrounded = (p.y - groundHit.point.y) < 0.7;
+  if (surfaceY !== null) {
+    groundBody.position.y = surfaceY;
+    // Un-embed only when GROSSLY sunk — e.g. spawned just below one of the
+    // level's thin Object_3 slabs, or shoved under terrain. The Cannon ground
+    // plane can't eject a body whose centre is already below it, so we lift it
+    // here. A WIDE deadzone (0.35) is critical: the rolling roundcube's centre
+    // naturally rests at surface+0.463 (half-extent), so correcting toward
+    // surface+0.5 every frame — as the old 0.02 deadzone did — snapped it up
+    // each frame and produced the wobble. Capped at 1.2 so we never yank a
+    // player up through a tall overhang they are legitimately standing beneath.
+    const restY = surfaceY + PLAYER_RADIUS;
+    const penetration = restY - p.y;
+    if (penetration > 0.35 && penetration < 1.2) {
+      p.y = restY;
+      if (body.velocity.y < 0) body.velocity.y = 0;
+    }
+    rayGrounded = (p.y - surfaceY) < 0.7;
   } else {
     groundBody.position.y = -1000;
     rayGrounded = false;
@@ -472,17 +499,28 @@ function resolveWallCollisions(body) {
     }
   }
 
-  // Ceiling collision — prevent jumping through ceilings
-  const ceilOrigin = new THREE.Vector3(p.x, p.y + 0.3, p.z);
-  const ceilHit = raycastLevel(ceilOrigin, new THREE.Vector3(0, 1, 0), PLAYER_RADIUS + 0.5, true);
-  if (ceilHit) {
-    const headroom = ceilHit.distance;
-    if (headroom < PLAYER_RADIUS + 0.1) {
-      p.y = ceilHit.point.y - PLAYER_RADIUS - 0.1;
+  // Ceiling collision — prevent jumping through ceilings. Anchored to the
+  // player's CURRENT position only (never previousPosition: a teleport/spawn can
+  // leave previousPosition far below, which would turn the sweep into a huge
+  // range and slam the player down onto an unrelated surface). Upward velocity is
+  // killed as soon as a ceiling comes within reach (~1.3 above centre), which
+  // stops a fast jump before the head ever reaches it. Several offset rays catch
+  // sloped / off-centre ceilings that a single centre ray would slip past.
+  const ceilBase = p.y + 0.3;
+  const ceilReach = PLAYER_RADIUS + 0.5;
+  const ro = PLAYER_RADIUS * 0.7;
+  const ceilOffsets = [[0, 0], [ro, 0], [-ro, 0], [0, ro], [0, -ro]];
+  let nearestCeil = null;
+  for (const [ox, oz] of ceilOffsets) {
+    const h = raycastLevel(new THREE.Vector3(p.x + ox, ceilBase, p.z + oz), new THREE.Vector3(0, 1, 0), ceilReach, true);
+    // Pick the LOWEST ceiling found so we clamp under the tightest overhang.
+    if (h && (!nearestCeil || h.point.y < nearestCeil.point.y)) nearestCeil = h;
+  }
+  if (nearestCeil) {
+    if (nearestCeil.point.y - ceilBase < PLAYER_RADIUS + 0.1) {
+      p.y = nearestCeil.point.y - PLAYER_RADIUS - 0.1;
     }
-    if (body.velocity.y > 0) {
-      body.velocity.y = 0;
-    }
+    if (body.velocity.y > 0) body.velocity.y = 0;
   }
 }
 
@@ -3760,7 +3798,11 @@ socket.on('currentPlayers', (data) => {
       localCrown = crown;
       localScoreSprite = scoreSprite;
       localBody = createPlayerBody(shape, true);
-      localBody.position.set(info.x, info.y, info.z);
+      // Spawn-point Y values are surface heights (captured via downward raycast),
+      // so lift the body centre by the player radius to rest ON the floor rather
+      // than embedded in it. (Previously the per-frame anti-sink did this, but it
+      // fought the rolling cube, so we lift once at spawn instead.)
+      localBody.position.set(info.x, info.y + PLAYER_RADIUS, info.z);
       camera.position.set(group.position.x, group.position.y + camHeight, group.position.z + chainLength);
       cameraLookAtTarget.copy(localBody.position);
     } else {
@@ -5048,7 +5090,7 @@ function animate() {
     }
     if (airTime > 10) {
       const rsp = randomSpawn();
-      localBody.position.set(rsp.x, rsp.y, rsp.z);
+      localBody.position.set(rsp.x, rsp.y + PLAYER_RADIUS, rsp.z);
       localBody.velocity.set(0, 0, 0);
       localBody.angularVelocity.set(0, 0, 0);
       airTime = 0;
