@@ -3274,8 +3274,35 @@ function handleMovement(delta) {
 const VISUAL_SMOOTH = 0.45;
 const _syncPos = new THREE.Vector3();
 const _syncQuat = new THREE.Quaternion();
+// The visual mesh is a 1-unit shape (half-height 0.5), but the roundcube's
+// PHYSICS body is shrunk (box half-extent s = 0.5*(1 - smoothing*0.3), or a
+// sphere) so it rests with its centre at surface+s. Drawing the visual at the
+// body centre would sink its bottom (surface + s - 0.5) below the floor.
+// Lifting the visual by (0.5 - s) makes its bottom rest exactly on the surface.
+function physHalfFromSmoothing(sm) {
+  sm = sm || 0;
+  return sm < 0.75 ? 0.5 * (1 - sm * 0.3) : 0.5 * (0.85 + sm * 0.15);
+}
+
+// When the inflated cel-shade outline (back-side hull, scaled ~1.15 about the
+// centre) is showing, its bottom pokes (scale-1)*0.5 below the cube. The cube
+// rolls, so we can't anchor the hull to its bottom; instead we lift the whole
+// visual by that overhang so the hull rests on the floor and the small gap under
+// the inner cube is hidden by the border itself. Zero when the outline is hidden
+// so the cube never floats.
+function outlineLift(mesh) {
+  if (!mesh) return 0;
+  const outline = mesh.children.find(c => c.isMesh && c.material && c.material.side === THREE.BackSide);
+  if (outline && outline.visible) return (outline.scale.x - 1) * 0.5;
+  return 0;
+}
+
 function syncMeshToBody(group, mesh, body) {
-  _syncPos.set(body.position.x, body.position.y, body.position.z);
+  const s = body.shapes && body.shapes[0];
+  let half = 0.5;
+  if (s) { if (s.halfExtents) half = s.halfExtents.y; else if (typeof s.radius === 'number') half = s.radius; }
+  const off = (0.5 - half) + outlineLift(mesh);
+  _syncPos.set(body.position.x, body.position.y + off, body.position.z);
   _syncQuat.set(body.quaternion.x, body.quaternion.y, body.quaternion.z, body.quaternion.w);
   group.position.lerp(_syncPos, VISUAL_SMOOTH);
   mesh.quaternion.slerp(_syncQuat, VISUAL_SMOOTH);
@@ -5103,8 +5130,12 @@ function animate() {
       const group = remotePlayers.get(id);
       const mesh = remoteMeshes.get(id);
       if (group && mesh) {
+        // Lift the visual so the cube (and its cel-shade hull, when shown) rests
+        // on top of the floor instead of clipping in — same offset as the local
+        // player, derived from the networked smoothing and outline visibility.
+        const rOff = (0.5 - physHalfFromSmoothing(mesh.userData.smoothing)) + outlineLift(mesh);
         group.position.x += (target.x - group.position.x) * 0.3;
-        group.position.y += (target.y - group.position.y) * 0.3;
+        group.position.y += (target.y + rOff - group.position.y) * 0.3;
         group.position.z += (target.z - group.position.z) * 0.3;
         if (target.qx !== undefined) {
           mesh.quaternion.slerp(new THREE.Quaternion(target.qx, target.qy, target.qz, target.qw), 0.3);
