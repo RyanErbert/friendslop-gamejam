@@ -231,11 +231,16 @@ gfxMenu.innerHTML = `
       <span style="color:#aaa;font-size:12px;letter-spacing:1px;">ENHANCED COLOR</span>
       <button class="gfx-btn lobby-option"></button>
     </div>
-    <button id="gfx-close" style="margin-top:20px;width:100%;padding:10px;background:#4488ff;color:#fff;border:none;border-radius:6px;cursor:pointer;font-family:'04b_03',Lato,sans-serif;font-size:14px;letter-spacing:1px;">RESUME (ESC)</button>
+    <button id="gfx-endvote" style="margin-top:20px;width:100%;padding:10px;background:#cc4444;color:#fff;border:none;border-radius:6px;cursor:pointer;font-family:'04b_03',Lato,sans-serif;font-size:13px;letter-spacing:1px;">VOTE END GAME</button>
+    <button id="gfx-close" style="margin-top:8px;width:100%;padding:10px;background:#4488ff;color:#fff;border:none;border-radius:6px;cursor:pointer;font-family:'04b_03',Lato,sans-serif;font-size:14px;letter-spacing:1px;">RESUME (ESC)</button>
   </div>`;
 document.body.appendChild(gfxMenu);
 document.getElementById('gfx-close').addEventListener('mouseenter', (e) => e.target.style.background = '#3366dd');
 document.getElementById('gfx-close').addEventListener('mouseleave', (e) => e.target.style.background = '#4488ff');
+const gfxEndVoteBtn = document.getElementById('gfx-endvote');
+gfxEndVoteBtn.addEventListener('mouseenter', (e) => e.target.style.background = '#b03333');
+gfxEndVoteBtn.addEventListener('mouseleave', (e) => e.target.style.background = '#cc4444');
+gfxEndVoteBtn.addEventListener('click', () => { socket.emit('startEndVote'); closeGfxMenu(); });
 
 const GFX_CYCLES = {
   resolution: [['perf', 'Performance'], ['balanced', 'Balanced'], ['sharp', 'Sharp']],
@@ -300,6 +305,7 @@ function openChat() {
   chatOpen = true;
   chatInputWrap.style.display = 'block';
   chatInput.value = '';
+  refreshChatInputStyle();
   // Focus next tick so the "T" that opened chat isn't typed into the field.
   setTimeout(() => chatInput.focus(), 0);
 }
@@ -307,6 +313,11 @@ function closeChat() {
   chatOpen = false;
   chatInputWrap.style.display = 'none';
   chatInput.blur();
+}
+function pushChatRow(row) {
+  chatLog.appendChild(row);
+  while (chatLog.children.length > 8) chatLog.removeChild(chatLog.firstChild);
+  setTimeout(() => { row.style.opacity = '0'; setTimeout(() => row.remove(), 700); }, 9000);
 }
 function addChatMessage(name, color, text) {
   const row = document.createElement('div');
@@ -318,15 +329,47 @@ function addChatMessage(name, color, text) {
   safeText.textContent = text;
   row.appendChild(safeName);
   row.appendChild(safeText);
-  chatLog.appendChild(row);
-  while (chatLog.children.length > 8) chatLog.removeChild(chatLog.firstChild);
-  setTimeout(() => { row.style.opacity = '0'; setTimeout(() => row.remove(), 700); }, 9000);
+  pushChatRow(row);
 }
+// Automated, game-generated messages (joins, votes, etc.) — italic gold, no name.
+function addSystemMessage(text) {
+  const row = document.createElement('div');
+  row.style.cssText = 'background:rgba(20,16,0,0.7);border-left:2px solid #ffd54a;border-radius:6px;padding:5px 9px;font-size:12px;color:#ffd54a;font-style:italic;text-shadow:1px 1px 2px rgba(0,0,0,0.9);word-break:break-word;transition:opacity 0.6s;opacity:1;text-align:left;';
+  row.textContent = text;
+  pushChatRow(row);
+}
+// Parse a "/command args" line typed into chat. Returns true if it was a command.
+function handleSlashCommand(raw) {
+  const parts = raw.slice(1).trim().split(/\s+/);
+  const cmd = (parts[0] || '').toLowerCase();
+  const arg = (parts[1] || '').toLowerCase();
+  if (cmd === 'vote') {
+    if (arg === 'yes' || arg === 'y') socket.emit('castVote', true);
+    else if (arg === 'no' || arg === 'n') socket.emit('castVote', false);
+    else socket.emit('startEndVote');
+  } else if (cmd === 'end' || cmd === 'endgame') {
+    socket.emit('startEndVote');
+  } else if (cmd === 'help') {
+    addSystemMessage('Commands: /vote yes, /vote no, /end (start end-game vote)');
+  } else {
+    addSystemMessage(`Unknown command: /${cmd}`);
+  }
+}
+// Highlight the input gold while it looks like a slash command.
+function refreshChatInputStyle() {
+  const isCmd = chatInput.value.startsWith('/');
+  chatInput.style.color = isCmd ? '#ffd54a' : '#fff';
+  chatInput.style.borderColor = isCmd ? '#ffd54a' : '#4488ff';
+}
+chatInput.addEventListener('input', refreshChatInputStyle);
 chatInput.addEventListener('keydown', (e) => {
   e.stopPropagation();
   if (e.code === 'Enter') {
     const msg = chatInput.value.trim();
-    if (msg) socket.emit('chat', msg);
+    if (msg) {
+      if (msg.startsWith('/')) handleSlashCommand(msg);
+      else socket.emit('chat', msg);
+    }
     closeChat();
   } else if (e.code === 'Escape') {
     closeChat();
@@ -3322,6 +3365,9 @@ const CAM_PITCH_MIN = -1.4;
 const CAM_PITCH_MAX = 1.4;
 const MOUSE_SENSITIVITY = 0.003;
 const CAM_DRAG_SPEED = 1.8;
+// Extra catch-up multiplier applied to the auto-follow when the camera is far
+// off the player's back, so sharper turns swing behind a bit faster.
+const CAM_TURN_BOOST = 1.5;
 let lastMouseMoveTime = 0;
 const MOUSE_IDLE_DELAY = 0.6;
 let cameraLookAtTarget = new THREE.Vector3();
@@ -3605,7 +3651,11 @@ function updateCamera(delta) {
       const behindYaw = Math.atan2(vx, vz) + Math.PI;
       let diff = behindYaw - camYaw;
       diff = diff - Math.round(diff / (2 * Math.PI)) * 2 * Math.PI;
-      camYaw += diff * CAM_DRAG_SPEED * delta;
+      // The farther the camera is from the player's back, the faster it swings
+      // around — sharper turns get a higher catch-up rate.
+      const turnBoost = 1 + Math.min(1, Math.abs(diff) / (Math.PI * 0.5)) * CAM_TURN_BOOST;
+      const dragT = Math.min(1, CAM_DRAG_SPEED * turnBoost * delta);
+      camYaw += diff * dragT;
     }
   }
 
@@ -3803,6 +3853,10 @@ function updateCrowns() {
 // --- Networking ---
 const socket = io();
 socket.on('chatMessage', (m) => { if (m && m.text) addChatMessage(m.name || 'Player', m.color, m.text); });
+socket.on('systemMessage', (m) => { if (m && m.text) addSystemMessage(m.text); });
+socket.on('gameEnded', () => {
+  if (gameStarted) { addSystemMessage('Game ended — returning to menu.'); returnToMenu(); }
+});
 
 function startGame() {
   socket.emit('ready', {

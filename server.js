@@ -132,6 +132,47 @@ const scores = {};
 let tagCooldownUntil = 0;
 const TAG_COOLDOWN_MS = 4000;
 
+// --- End-game vote state ---
+// endVote = { voters:Set, yes:Set, no:Set, timer } while a vote is running.
+let endVote = null;
+const END_VOTE_TIMEOUT_MS = 30000;
+
+function sysMsg(text) {
+  io.emit('systemMessage', { text });
+}
+
+function votesNeeded() {
+  return endVote ? Math.floor(endVote.voters.size / 2) + 1 : 0;
+}
+
+function checkEndVote() {
+  if (!endVote) return;
+  const needed = votesNeeded();
+  if (endVote.yes.size >= needed) { finishEndVote(true); return; }
+  const undecided = endVote.voters.size - endVote.yes.size - endVote.no.size;
+  // Can't possibly reach the threshold anymore — fail early.
+  if (endVote.yes.size + undecided < needed) finishEndVote(false);
+}
+
+function finishEndVote(passed) {
+  if (!endVote) return;
+  clearTimeout(endVote.timer);
+  endVote = null;
+  if (passed) { sysMsg('Vote passed — ending game.'); endGame(); }
+  else sysMsg('Vote to end the game failed.');
+}
+
+function endGame() {
+  if (endVote) { clearTimeout(endVote.timer); endVote = null; }
+  for (const id of Object.keys(scores)) scores[id] = 0;
+  io.emit('scores', scores);
+  holderID = null;
+  io.emit('holderChanged', holderID);
+  readyIds.clear();
+  if (levelLocked) { levelLocked = false; io.emit('lobbyLocked', false); }
+  io.emit('gameEnded');
+}
+
 // --- World items state ---
 const activeTeleporters = [];
 const activeMines = [];
@@ -240,6 +281,10 @@ io.on('connection', (socket) => {
     socket.emit('currentModels', activeModels);
     socket.emit('currentChannels', activeChannels);
     socket.broadcast.emit('newPlayer', { id: socket.id, ...players[socket.id] });
+    socket.broadcast.emit('systemMessage', { text: `${players[socket.id].name} joined the game.` });
+
+    // A new player joining invalidates an in-progress end-game vote tally.
+    if (endVote) finishEndVote(false);
 
     // First player becomes holder
     if (!holderID) pickRandomHolder();
@@ -514,12 +559,48 @@ io.on('connection', (socket) => {
     });
   });
 
+  socket.on('startEndVote', () => {
+    if (!readyIds.has(socket.id)) return;       // only in-game players can call a vote
+    if (endVote) return;                         // a vote is already running
+    endVote = {
+      voters: new Set([...readyIds]),
+      yes: new Set([socket.id]),                 // initiator implicitly votes yes
+      no: new Set(),
+      timer: null
+    };
+    endVote.timer = setTimeout(() => finishEndVote(false), END_VOTE_TIMEOUT_MS);
+    const name = players[socket.id] ? players[socket.id].name : 'Player';
+    sysMsg(`${name} wants to end the game. Vote to end game? Type /vote yes or /vote no (${endVote.yes.size}/${votesNeeded()})`);
+    checkEndVote();
+  });
+
+  socket.on('castVote', (val) => {
+    if (!endVote || !endVote.voters.has(socket.id)) return;
+    const yes = !!val;
+    if (yes) { endVote.yes.add(socket.id); endVote.no.delete(socket.id); }
+    else { endVote.no.add(socket.id); endVote.yes.delete(socket.id); }
+    const name = players[socket.id] ? players[socket.id].name : 'Player';
+    sysMsg(`${name} voted ${yes ? 'yes' : 'no'} (${endVote.yes.size}/${votesNeeded()} to end)`);
+    checkEndVote();
+  });
+
   socket.on('disconnect', () => {
     console.log(`Player disconnected: ${socket.id}`);
+    const wasInGame = readyIds.has(socket.id);
+    const leftName = players[socket.id] ? players[socket.id].name : null;
     delete players[socket.id];
     delete scores[socket.id];
     readyIds.delete(socket.id);
     delete lastActivity[socket.id];
+    if (wasInGame && leftName) sysMsg(`${leftName} left the game.`);
+    // Drop the player from any running vote and re-evaluate the tally.
+    if (endVote && endVote.voters.has(socket.id)) {
+      endVote.voters.delete(socket.id);
+      endVote.yes.delete(socket.id);
+      endVote.no.delete(socket.id);
+      if (endVote.voters.size === 0) finishEndVote(false);
+      else checkEndVote();
+    }
     if (holderID === socket.id) pickRandomHolder();
     // Last player leaving re-opens the lobby for level/setting changes.
     if (readyIds.size === 0 && levelLocked) { levelLocked = false; io.emit('lobbyLocked', false); }

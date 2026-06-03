@@ -5,7 +5,8 @@
       "name": "3d-game",
       "runtimeExecutable": "node",
       "runtimeArgs": ["server.js"],
-      "port": 3001
+      "port": 3001,
+      "autoPort": true
     }
   ]
 }
