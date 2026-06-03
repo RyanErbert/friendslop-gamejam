@@ -187,6 +187,16 @@ setInterval(() => {
 }, 30000);
 
 io.on('connection', (socket) => {
+  // Send the current roster (with positions) so a client sitting in the menu can
+  // render a live birdseye spectator view of a game already in progress. Ongoing
+  // movement arrives via the existing broadcast 'playerMoved'/'newPlayer' events.
+  socket.emit('spectatorPlayers', {
+    activeLevel,
+    players: Object.fromEntries(
+      [...readyIds].filter(id => players[id]).map(id => [id, players[id]])
+    )
+  });
+
   socket.on('selectLevel', (level) => {
     // Once a game is in progress the level is locked and cannot change. While
     // the lobby is open, any player's selection becomes THE active level and is

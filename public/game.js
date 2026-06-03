@@ -2301,6 +2301,10 @@ function joinGame() {
                                   : (selectedLevel || serverActiveLevel || 'level_1.glb');
   socket.emit('selectLevel', levelToLoad);
   if (currentLevelName !== levelToLoad || !levelLoaded) loadGameLevel(levelToLoad);
+  // The menu birdseye blacks out the scene + hides the level; restore them for
+  // gameplay (loadGameLevel may be skipped above when the level is already loaded).
+  scene.background = skyTex;
+  if (currentLevelObj) currentLevelObj.visible = true;
   cleanupPreviews();
   stopActiveGamePolling();
   const agiEl = document.getElementById('active-game-info');
@@ -2539,7 +2543,7 @@ async function initLevelSelect() {
 }
 
 function createLevelPreview(filename, container) {
-  const PW = 300, PH = 190;
+  const PW = 480, PH = 300;
   const canvas = document.createElement('canvas');
   canvas.width = PW;
   canvas.height = PH;
@@ -3813,6 +3817,11 @@ function startGame() {
 
 socket.on('currentPlayers', (data) => {
   selfId = data.selfId;
+  // Clear any spectator-mode remote meshes created while we were in the menu so
+  // joining doesn't leave duplicates behind.
+  for (const group of remotePlayers.values()) scene.remove(group);
+  remotePlayers.clear(); remoteMeshes.clear(); remoteTargets.clear();
+  playerOutlines.clear(); playerCrowns.clear(); playerScoreSprites.clear();
   for (const [id, info] of Object.entries(data.players)) {
     const shape = info.shape || info.type || 'box';
     const color = info.skinColor || info.color;
@@ -3879,6 +3888,27 @@ socket.on('playerSprintStart', (id) => {
 
 socket.on('playerMoved', (data) => {
   if (remotePlayers.has(data.id)) remoteTargets.set(data.id, data);
+});
+
+// Roster snapshot for the menu birdseye spectator. Build meshes for any players
+// already in a game when we connected; ongoing updates come via 'playerMoved'.
+socket.on('spectatorPlayers', (data) => {
+  if (gameStarted) return;
+  if (data && data.activeLevel) serverActiveLevel = data.activeLevel;
+  for (const [id, info] of Object.entries((data && data.players) || {})) {
+    if (id === selfId || remotePlayers.has(id)) continue;
+    const shape = info.shape || info.type || 'box';
+    const color = info.skinColor || info.color;
+    const { group, mesh, outline, crown, scoreSprite } = createPlayerVisual(color, shape, info.name, info.skinImage, info.model);
+    group.position.set(info.x, info.y, info.z);
+    remotePlayers.set(id, group);
+    remoteMeshes.set(id, mesh);
+    playerOutlines.set(id, outline);
+    playerCrowns.set(id, crown);
+    playerScoreSprites.set(id, scoreSprite);
+    playerNames.set(id, info.name);
+    remoteTargets.set(id, info);
+  }
 });
 
 socket.on('playerDisconnected', (id) => {
@@ -4752,6 +4782,60 @@ function updateDebug(delta) {
     `F4: godmode`;
 }
 
+// --- Menu background / live birdseye spectator ---
+// In the menu the full-screen scene stays BLACK. The selected map is previewed
+// in the selector panel instead. When a game is actually in progress we render a
+// dimmed birdseye that smoothly glides between the live players.
+const _blackBg = new THREE.Color(0x000000);
+let spectateTargetId = null;
+let spectateHold = 0;
+const SPECTATE_HOLD_TIME = 6;
+const _specDesired = new THREE.Vector3();
+const _specLook = new THREE.Vector3();
+const _specLookCurrent = new THREE.Vector3();
+let _specLookInit = false;
+
+function updateMenuBackground(delta) {
+  const ids = [...remotePlayers.keys()];
+  const active = ids.length > 0;
+
+  // Black unless a game is on; only show the level + players during spectating.
+  if (scene.background !== (active ? skyTex : _blackBg)) scene.background = active ? skyTex : _blackBg;
+  if (currentLevelObj) currentLevelObj.visible = active;
+  for (const g of remotePlayers.values()) g.visible = active;
+  // Lighter overlay while spectating so the action shows through the dim.
+  if (menuOverlay) menuOverlay.style.background = active ? 'rgba(0,0,0,0.5)' : 'rgba(0,0,0,0.85)';
+
+  if (!active) { spectateTargetId = null; _specLookInit = false; return; }
+
+  // Cycle the focused player every few seconds.
+  spectateHold -= delta;
+  if (!spectateTargetId || !remotePlayers.has(spectateTargetId) || spectateHold <= 0) {
+    const idx = ids.indexOf(spectateTargetId);
+    spectateTargetId = ids[(idx + 1) % ids.length];
+    spectateHold = SPECTATE_HOLD_TIME;
+  }
+  const target = remotePlayers.get(spectateTargetId);
+  if (!target) return;
+
+  // Moderate-distance birdseye that slowly arcs around the focused player; the
+  // camera lerps toward the target each frame so switching players glides over.
+  const t = performance.now() / 1000;
+  const angle = t * 0.2;
+  const dist = 16, height = 10;
+  _specDesired.set(
+    target.position.x + Math.cos(angle) * dist,
+    target.position.y + height,
+    target.position.z + Math.sin(angle) * dist
+  );
+  const a = 1 - Math.exp(-1.5 * delta); // frame-rate independent smoothing
+  camera.position.lerp(_specDesired, a);
+  _specLook.copy(target.position);
+  if (!_specLookInit) { _specLookCurrent.copy(_specLook); _specLookInit = true; }
+  _specLookCurrent.lerp(_specLook, a);
+  camera.lookAt(_specLookCurrent);
+}
+
 // --- Main loop ---
 const PHYSICS_STEP = 1 / 60;
 
@@ -4762,15 +4846,8 @@ function animate() {
 
   const isBuilding = (!godmode && inventory.length > 0 && ['block', 'wall', 'ramp', 'platform'].includes(inventory[0].type)) || (godmode && godmodeToolSelected === 'build_mode');
 
-  if (!gameStarted && currentLevelObj) {
-    if (SPAWN_POINTS && SPAWN_POINTS.length > 0) {
-      const t = performance.now() / 1000;
-      const index = Math.floor(t / 8) % SPAWN_POINTS.length;
-      const sp = SPAWN_POINTS[index];
-      const angle = t * 0.15;
-      camera.position.set(sp.x + Math.cos(angle) * 15, sp.y + 6, sp.z + Math.sin(angle) * 15);
-      camera.lookAt(sp.x, sp.y + 2, sp.z);
-    }
+  if (!gameStarted) {
+    updateMenuBackground(delta);
   }
 
   if (gameStarted && localBody) {
